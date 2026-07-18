@@ -1,0 +1,29 @@
+mlx-whisper
+sounddevice
+pynput
+requests
+
+# macOS system framework bindings: AVFoundation (explicit mic-permission
+# prompt), ApplicationServices/HIServices (AXIsProcessTrusted Accessibility
+# check), Cocoa/Quartz/CoreText (the overlay waveform window), CoreAudio/
+# CoreMedia (sounddevice/AVFoundation support). Pinned to the exact version
+# verified working in development.
+pyobjc-core==12.2.1
+pyobjc-framework-Cocoa==12.2.1
+pyobjc-framework-Quartz==12.2.1
+pyobjc-framework-ApplicationServices==12.2.1
+pyobjc-framework-AVFoundation==12.2.1
+pyobjc-framework-CoreAudio==12.2.1
+pyobjc-framework-CoreMedia==12.2.1
+pyobjc-framework-CoreText==12.2.1
+
+# install.sh runs the following automatically after the above — documented
+# here for anyone installing manually with `pip install -r requirements.txt`:
+#   pip uninstall -y torch numba scipy llvmlite
+# mlx-whisper declares these as dependencies but flow.py's code path never
+# needs them: torch is never imported at all, and numba/scipy/llvmlite are
+# only pulled in by mlx_whisper's unused word-timestamps feature (see the
+# sys.modules stub near the top of flow.py, which fakes just enough of
+# numba/scipy for that import to succeed without installing the real ~250MB
+# packages). If a future mlx-whisper update changes timing.py's imports,
+# this stub may need updating — it'll fail loudly (ImportError) if so.

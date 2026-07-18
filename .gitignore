@@ -1,0 +1,14 @@
+# Personal/generated — each install gets its own, not shared via git
+venv/
+WingVox.app/
+build/
+dist/
+dictionary.txt
+corrections.txt
+wingvox.log
+wingvox.lock
+
+# Python/OS cruft
+__pycache__/
+*.pyc
+.DS_Store
