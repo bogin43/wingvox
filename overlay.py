@@ -1,4 +1,4 @@
-"""Floating status pill for WingVox, like Wispr Flow's overlay.
+"""Floating status pill for WingVox.
 
 A small always-on-top panel at the bottom-center of the screen that shows
 what the pipeline is doing (recording / transcribing / cleaning / errors).

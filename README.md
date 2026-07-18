@@ -1,6 +1,6 @@
 # WingVox
 
-Local Wispr Flow clone. Hold **Right Option**, speak, release. Cleaned-up text is pasted into whatever app has focus. 100% offline.
+Local, offline voice dictation for macOS. Hold **Right Option**, speak, release. Cleaned-up text is pasted into whatever app has focus. 100% offline.
 
 Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> clipboard + Cmd+V.
 
