@@ -4,17 +4,24 @@ Local, offline voice dictation for macOS. Hold **Right Option**, speak, release.
 
 Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> clipboard + Cmd+V.
 
-## Set up (first time)
+## Get it
+
+Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal and run:
 
 ```bash
+git clone https://github.com/bogin43/wingvox.git ~/wingvox
 cd ~/wingvox
 ./install.sh
 ```
 
 Installs Homebrew/Ollama/Python as needed, builds `WingVox.app`, and sets it up to
 start automatically at login. Takes a few minutes, longer on a slow connection (the
-Whisper model is ~1.5GB, the cleanup model another ~2GB). Then see `SETUP.md` for
-the one-time macOS permission steps it can't do for you.
+Whisper model is ~1.5GB, the cleanup model another ~2GB — expect ~4GB of downloads
+total on first run). Then see `SETUP.md` for the one-time macOS permission steps
+it can't do for you.
+
+Don't move the `~/wingvox` folder after installing — both the app and its
+background service reference this exact location.
 
 ## Run it
 
