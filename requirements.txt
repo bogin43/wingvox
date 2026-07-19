@@ -3,6 +3,12 @@ sounddevice
 pynput
 requests
 
+# Needed to build WingVox.app (setup.py's py2app step). Installed explicitly
+# here rather than relying on setuptools' `setup_requires` auto-fetch, which
+# uses a deprecated "egg" mechanism that fails to pull in py2app's own
+# dependencies (modulegraph, macholib) correctly in this environment.
+py2app
+
 # macOS system framework bindings: AVFoundation (explicit mic-permission
 # prompt), ApplicationServices/HIServices (AXIsProcessTrusted Accessibility
 # check), Cocoa/Quartz/CoreText (the overlay waveform window), CoreAudio/
