@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WingVox — local voice dictation for macOS</title>
-<meta name="description" content="Hold Right Option, speak, release. Local, offline voice dictation for Apple Silicon Macs.">
+<title>Wingvox — fully offline voice dictation</title>
+<meta name="description" content="Hold Right Option, speak, release. Fully offline voice dictation that runs entirely on your device.">
 <style>
   :root {
     color-scheme: light dark;
@@ -137,9 +137,9 @@
 <div class="wrap">
 
   <header class="hero">
-    <img src="wingvox_bird.png" alt="WingVox logo">
-    <h1>WingVox</h1>
-    <p class="tagline">Hold Right Option, speak, release. Local, offline voice dictation for macOS &mdash; nothing leaves your Mac.</p>
+    <img src="wingvox_bird.png" alt="Wingvox logo">
+    <h1>Wingvox</h1>
+    <p class="tagline">Hold Right Option, speak, release. Fully offline voice dictation that runs entirely on your device &mdash; nothing leaves it.</p>
   </header>
 
   <section>
@@ -155,9 +155,9 @@
     <h2>How it works</h2>
     <div class="steps">
       <div class="step"><span class="num">1</span><br>Hold Right Option and speak</div>
-      <div class="step"><span class="num">2</span><br>Whisper transcribes on-device</div>
+      <div class="step"><span class="num">2</span><br>Audio is transcribed on-device</div>
       <div class="step"><span class="num">3</span><br>A local LLM cleans it up</div>
-      <div class="step"><span class="num">4</span><br>Pastes into whatever's focused</div>
+      <div class="step"><span class="num">4</span><br>Pastes wherever your cursor is focused</div>
     </div>
   </section>
 
@@ -169,7 +169,7 @@
       <ul>
         <li>It requests <strong>Microphone</strong>, <strong>Accessibility</strong>, and <strong>Input Monitoring</strong> permissions &mdash; needed to capture audio and paste text into other apps.</li>
         <li>It installs Homebrew, Xcode Command Line Tools, and Ollama if they're missing on your Mac.</li>
-        <li>All transcription and text cleanup happen locally &mdash; no audio or text is sent anywhere.</li>
+        <li>Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it's all private.</li>
       </ul>
       Prefer to read the code first? See the
       <a href="https://github.com/bogin43/wingvox">source and full README on GitHub</a>.

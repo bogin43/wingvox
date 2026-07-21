@@ -1,4 +1,4 @@
-# WingVox setup — after running install.sh
+# Wingvox setup — after running install.sh
 
 `install.sh` handles everything it can automatically. This guide covers the
 few steps that only you can do — macOS requires an actual click from a human
@@ -9,7 +9,7 @@ in System Settings for these, so no script can do them for you.
 
 ## 1. Microphone
 
-WingVox needs to hear you.
+Wingvox needs to hear you.
 
 1. Open **System Settings > Privacy & Security > Microphone**
 2. Find the entry matching the exact path `install.sh` printed at the end
@@ -22,7 +22,7 @@ speaking clearly.
 
 ## 2. Accessibility
 
-WingVox needs this to detect your hotkey press and paste text into whatever
+Wingvox needs this to detect your hotkey press and paste text into whatever
 app you're using.
 
 1. Open **System Settings > Privacy & Security > Accessibility**
@@ -31,7 +31,7 @@ app you're using.
    path from `install.sh`'s output)
 
 Skip this and you'll see "Accessibility access not granted — hotkey & paste
-won't work" the first time WingVox starts.
+won't work" the first time Wingvox starts.
 
 ## 3. Input Monitoring
 
@@ -46,8 +46,8 @@ overlay, just silence.
 
 ## After granting permissions
 
-If WingVox was already running when you granted these, quit and relaunch it
-(or just log out and back in — WingVox restarts automatically on login).
+If Wingvox was already running when you granted these, quit and relaunch it
+(or just log out and back in — Wingvox restarts automatically on login).
 Toggling a permission for an already-running app usually doesn't take effect
 until it restarts.
 
@@ -67,17 +67,17 @@ with your transcribed text once it pastes.
 | "Accessibility access not granted" message on startup | Same as above (step 2) |
 | "Ollama not running — will paste raw transcripts" | Run `brew services start ollama` |
 | "Ollama model not pulled — will paste raw transcripts" | Run `ollama pull qwen2.5:3b` |
-| "WingVox is already running" when trying to start it manually | It's already running via the background service — that's normal, no action needed |
+| "Wingvox is already running" when trying to start it manually | It's already running via the background service — that's normal, no action needed |
 | Text pastes but sounds too polished/reworded | Not expected — please report this, cleanup is meant to only fix filler words and punctuation |
 
 ## Where to get help
 
-Ask in the Millionaire University community — mention you're using WingVox
+Ask in the Millionaire University community — mention you're using Wingvox
 and what step you're stuck on.
 
 ## Reference: other Whisper model sizes
 
-WingVox ships with `whisper-large-v3-turbo` (~1.5GB), the best balance of
+Wingvox ships with `whisper-large-v3-turbo` (~1.5GB), the best balance of
 speed and accuracy. If you ever want to try a smaller model — for a slow
 connection or an older Mac — these are the other options (edit
 `WHISPER_REPO` in `flow.py`, prefixed with `mlx-community/`):

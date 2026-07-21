@@ -3,7 +3,7 @@ sounddevice
 pynput
 requests
 
-# Needed to build WingVox.app (setup.py's py2app step). Installed explicitly
+# Needed to build Wingvox.app (setup.py's py2app step). Installed explicitly
 # here rather than relying on setuptools' `setup_requires` auto-fetch, which
 # uses a deprecated "egg" mechanism that fails to pull in py2app's own
 # dependencies (modulegraph, macholib) correctly in this environment.

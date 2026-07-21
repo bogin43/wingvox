@@ -6,9 +6,9 @@ OPTIONS = {
     "argv_emulation": False,
     "plist": {
         "CFBundleIdentifier": "com.broganwilliams.wingvox",
-        "CFBundleName": "WingVox",
+        "CFBundleName": "Wingvox",
         "LSUIElement": True,
-        "NSMicrophoneUsageDescription": "WingVox needs microphone access to transcribe your dictation.",
+        "NSMicrophoneUsageDescription": "Wingvox needs microphone access to transcribe your dictation.",
     },
 }
 

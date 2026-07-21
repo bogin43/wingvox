@@ -1,4 +1,4 @@
-"""Floating status pill for WingVox.
+"""Floating status pill for Wingvox.
 
 A small always-on-top panel at the bottom-center of the screen that shows
 what the pipeline is doing (recording / transcribing / cleaning / errors).
@@ -312,5 +312,5 @@ def run_event_loop():
     # (App Nap infrastructure) is otherwise free to silently kill this process
     # when idle -- a clean exit(0), no crash, no traceback, just gone. This
     # process must keep running indefinitely to catch the hotkey, so opt out.
-    NSProcessInfo.processInfo().disableAutomaticTermination_("WingVox must run continuously to catch the hotkey")
+    NSProcessInfo.processInfo().disableAutomaticTermination_("Wingvox must run continuously to catch the hotkey")
     AppHelper.runConsoleEventLoop(installInterrupt=True)

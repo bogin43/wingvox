@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WingVox: hold Right Option, speak, release -> cleaned text
+"""Wingvox: hold Right Option, speak, release -> cleaned text
 is pasted into whatever app has focus. 100% offline.
 
 Usage:
@@ -23,9 +23,9 @@ from pathlib import Path
 
 if platform.machine() != "arm64":
     sys.exit(
-        f"WingVox requires an Apple Silicon Mac (M1/M2/M3/M4). This Mac "
+        f"Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4). This Mac "
         f"reports '{platform.machine()}', which mlx (the ML framework "
-        f"WingVox is built on) does not support."
+        f"Wingvox is built on) does not support."
     )
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -307,7 +307,7 @@ def _words(text: str) -> list:
 def _looks_like_prompt_echo(text: str, prompt: str) -> bool:
     """A quick tap or a quiet/ambiguous stretch of audio can make Whisper
     "echo" its own initial_prompt (the glossary line) back as a short fake
-    segment — e.g. "Glossary, Wollama, WingVox." The word "glossary" itself
+    segment — e.g. "Glossary, Wollama, Wingvox." The word "glossary" itself
     is the prompt's own framing text, not something real speech would ever
     say — its presence is a much stronger echo signal than generic word
     overlap, which false-positives on genuine short phrases that happen to
@@ -447,13 +447,13 @@ def acquire_single_instance_lock() -> bool:
 
 def run():
     if not acquire_single_instance_lock():
-        print("  ⚠ WingVox is already running (another instance holds the lock). Exiting.")
+        print("  ⚠ Wingvox is already running (another instance holds the lock). Exiting.")
         sys.exit(0)
     dictionary = load_dictionary()
     corrections = load_corrections()
     print("  Requesting microphone access…")
     if not ensure_microphone_access():
-        print("  ⚠ Microphone access not granted. Enable WingVox in "
+        print("  ⚠ Microphone access not granted. Enable Wingvox in "
               "System Settings > Privacy & Security > Microphone, then restart.")
     try:
         from overlay import StatusOverlay, run_event_loop
@@ -469,7 +469,7 @@ def run():
 
     if not ensure_accessibility_access():
         status("⚠ Accessibility access not granted — hotkey & paste won't work. "
-               "Enable WingVox in System Settings > Privacy & Security > "
+               "Enable Wingvox in System Settings > Privacy & Security > "
                "Accessibility, then restart.", "orange")
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
@@ -636,7 +636,7 @@ if __name__ == "__main__":
     elif args[0] == "test-clean":
         cmd_test_clean(args[1] if len(args) > 1 else "um so like this is uh a test you know")
     elif args[0] == "test-inject":
-        cmd_test_inject(args[1] if len(args) > 1 else "Hello from WingVox!")
+        cmd_test_inject(args[1] if len(args) > 1 else "Hello from Wingvox!")
     elif args[0] == "add-correction":
         cmd_add_correction(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
     else:

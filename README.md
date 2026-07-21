@@ -1,8 +1,8 @@
-# WingVox
+# Wingvox
 
 **Website:** [bogin43.github.io/wingvox](https://bogin43.github.io/wingvox/)
 
-Local, offline voice dictation for macOS. Hold **Right Option**, speak, release. Cleaned-up text is pasted into whatever app has focus. 100% offline.
+Fully offline voice dictation. Hold **Right Option**, speak, release. Cleaned-up text is pasted wherever your cursor is focused.
 
 Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> clipboard + Cmd+V.
 
@@ -30,7 +30,7 @@ cd ~/wingvox
 ./install.sh
 ```
 
-Installs Homebrew/Ollama/Python as needed, builds `WingVox.app`, and sets it up to
+Installs Homebrew/Ollama/Python as needed, builds `Wingvox.app`, and sets it up to
 start automatically at login. Takes a few minutes, longer on a slow connection (the
 Whisper model is ~1.5GB, the cleanup model another ~2GB — expect ~4GB of downloads
 total on first run). Then see `SETUP.md` for the one-time macOS permission steps
@@ -41,7 +41,7 @@ background service reference this exact location.
 
 ## Run it
 
-After `install.sh`, WingVox starts automatically every login — nothing to run
+After `install.sh`, Wingvox starts automatically every login — nothing to run
 manually. To restart it by hand (e.g. after editing `flow.py`/`overlay.py`):
 
 ```bash

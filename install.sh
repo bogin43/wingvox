@@ -1,5 +1,5 @@
 #!/bin/bash
-# WingVox installer: sets up everything needed to run WingVox on this Mac,
+# Wingvox installer: sets up everything needed to run Wingvox on this Mac,
 # building the app locally rather than shipping a pre-built binary (a
 # pre-built .app would be rejected by Gatekeeper without a paid Apple
 # Developer signing certificate, and mlx's Metal shader bundling isn't
@@ -11,7 +11,7 @@ cd "$REPO_DIR"
 
 step() { echo; echo "==> $1"; }
 
-step "Installing WingVox from: $REPO_DIR"
+step "Installing Wingvox from: $REPO_DIR"
 echo "    This location is now permanent — the app and its background"
 echo "    service both reference this exact folder path. Don't move it"
 echo "    after install without re-running this script."
@@ -19,8 +19,8 @@ echo "    after install without re-running this script."
 # ---------- 1. Apple Silicon check ----------
 step "Checking for Apple Silicon"
 if [[ "$(uname -m)" != "arm64" ]]; then
-    echo "WingVox requires an Apple Silicon Mac (M1/M2/M3/M4)." >&2
-    echo "This Mac reports '$(uname -m)', which the ML framework WingVox" >&2
+    echo "Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4)." >&2
+    echo "This Mac reports '$(uname -m)', which the ML framework Wingvox" >&2
     echo "is built on (mlx) does not support." >&2
     exit 1
 fi
@@ -106,12 +106,12 @@ else
 fi
 
 # ---------- 9. Build the app ----------
-step "Building WingVox.app"
-rm -rf "$REPO_DIR/build" "$REPO_DIR/dist" "$REPO_DIR/WingVox.app"
+step "Building Wingvox.app"
+rm -rf "$REPO_DIR/build" "$REPO_DIR/dist" "$REPO_DIR/Wingvox.app"
 "$VENV_PY" setup.py py2app -A -q
-mv dist/WingVox.app "$REPO_DIR/WingVox.app"
+mv dist/Wingvox.app "$REPO_DIR/Wingvox.app"
 rm -rf "$REPO_DIR/build" "$REPO_DIR/dist"
-echo "    Built $REPO_DIR/WingVox.app"
+echo "    Built $REPO_DIR/Wingvox.app"
 
 # ---------- 10. LaunchAgent ----------
 step "Installing the background service"
@@ -130,13 +130,13 @@ if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null; then
     sleep 2
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
 fi
-echo "    WingVox will now start automatically every time you log in."
+echo "    Wingvox will now start automatically every time you log in."
 
 # ---------- Done ----------
 step "Install complete"
 RESOLVED_PY="$("$VENV_PY" -c 'import sys; print(sys.executable)')"
 echo
-echo "One more thing — macOS needs your permission for WingVox to work."
+echo "One more thing — macOS needs your permission for Wingvox to work."
 echo "This can't be done from a script; it needs a few clicks in System Settings."
 echo
 echo "The exact program that needs permission is:"

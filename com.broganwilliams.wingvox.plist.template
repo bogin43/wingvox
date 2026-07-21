@@ -6,7 +6,7 @@
     <string>com.broganwilliams.wingvox</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__REPO_DIR__/WingVox.app/Contents/MacOS/WingVox</string>
+        <string>__REPO_DIR__/Wingvox.app/Contents/MacOS/Wingvox</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__REPO_DIR__</string>

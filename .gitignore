@@ -1,6 +1,6 @@
 # Personal/generated — each install gets its own, not shared via git
 venv/
-WingVox.app/
+Wingvox.app/
 build/
 dist/
 dictionary.txt
