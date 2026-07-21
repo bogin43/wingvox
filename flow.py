@@ -281,15 +281,23 @@ def transcribe(audio: np.ndarray, dictionary: str, corrections: list = ()) -> st
     # hallucination loops repeat one phrase endlessly; real speech doesn't
     words = text.lower().split()
     if len(words) > 12 and len(set(words)) / len(words) < 0.2:
+        print(f"  [discarded: repetition loop] {len(words)} words, "
+              f"{len(set(words))} unique: {text!r}")
         return ""
     # Whisper's initial_prompt (the dictionary glossary) can get "recited" as
-    # elaborate made-up sentences when the audio is quiet/ambiguous — no
-    # human speaks denser than ~4.5 words/sec, so implausibly wordy output
-    # for the given clip length is a hallucination, not a transcript.
+    # elaborate made-up sentences when the audio is quiet/ambiguous, producing
+    # far more words than the clip could actually contain. A 4.5 words/sec
+    # cutoff also flagged genuine fast, filler-word-heavy speech (e.g. a quick
+    # "yeah keep going and just do as much of it as you can" got discarded
+    # entirely) — raised to 7 words/sec and 13+ words to keep catching runaway
+    # recitations without silently eating real fast speech.
     duration_s = len(audio) / SAMPLE_RATE
-    if len(words) > 8 and len(words) > duration_s * 4.5:
+    if len(words) > 13 and len(words) > duration_s * 7:
+        print(f"  [discarded: implausible word rate] {len(words)} words in "
+              f"{duration_s:.2f}s ({len(words) / duration_s:.1f} words/sec): {text!r}")
         return ""
     if prompt and _looks_like_prompt_echo(text, prompt):
+        print(f"  [discarded: prompt echo] {text!r}")
         return ""
     if corrections:
         text = apply_corrections(text, corrections)
