@@ -4,6 +4,13 @@ Local, offline voice dictation for macOS. Hold **Right Option**, speak, release.
 
 Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> clipboard + Cmd+V.
 
+> This is a personal project, shared as-is in case it's useful to others, not a
+> polished product with official support. It requires **Microphone**,
+> **Accessibility**, and **Input Monitoring** permissions (see below for why), and
+> `install.sh` will install Homebrew/Xcode Command Line Tools/Ollama on your Mac if
+> they're missing. Read the script before running it if you'd like to know exactly
+> what it does. Use at your own risk.
+
 ## Get it
 
 Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal and run:
