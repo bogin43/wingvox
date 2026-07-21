@@ -1,5 +1,7 @@
 # WingVox
 
+**Website:** [bogin43.github.io/wingvox](https://bogin43.github.io/wingvox/)
+
 Local, offline voice dictation for macOS. Hold **Right Option**, speak, release. Cleaned-up text is pasted into whatever app has focus. 100% offline.
 
 Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> clipboard + Cmd+V.
@@ -14,6 +16,13 @@ Pipeline: mic -> mlx-whisper (large-v3-turbo) -> Ollama qwen2.5:3b cleanup -> cl
 ## Get it
 
 Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash
+```
+
+This clones the repo to `~/wingvox` and runs the installer. Prefer to see the
+code before running anything? Clone it yourself instead:
 
 ```bash
 git clone https://github.com/bogin43/wingvox.git ~/wingvox

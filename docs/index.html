@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WingVox — local voice dictation for macOS</title>
+<meta name="description" content="Hold Right Option, speak, release. Local, offline voice dictation for Apple Silicon Macs.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #5f6368;
+    --card: #f5f5f7;
+    --border: #e0e0e3;
+    --accent: #2f6fed;
+    --accent-fg: #ffffff;
+    --code-bg: #1e1e24;
+    --code-fg: #e7e7ea;
+    --warn-bg: #fff8e6;
+    --warn-border: #f0dca0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212;
+      --fg: #f0f0f2;
+      --muted: #a3a3a8;
+      --card: #1c1c1f;
+      --border: #303034;
+      --accent: #5b8cf5;
+      --accent-fg: #0b1020;
+      --code-bg: #0b0b0e;
+      --code-fg: #d8d8dd;
+      --warn-bg: #2a2412;
+      --warn-border: #5a4a1a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 64px 24px 96px;
+  }
+  header.hero { text-align: center; margin-bottom: 48px; }
+  header.hero img {
+    width: 96px;
+    height: 96px;
+    object-fit: contain;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 2.1rem; margin: 0 0 8px; }
+  .tagline { color: var(--muted); font-size: 1.15rem; margin: 0 auto; max-width: 520px; }
+  section { margin-bottom: 40px; }
+  h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 12px; }
+
+  .install-box {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.92rem;
+    overflow-x: auto;
+  }
+  .install-box code { white-space: pre; flex: 1; }
+  .copy-btn {
+    flex-shrink: 0;
+    background: var(--accent);
+    color: var(--accent-fg);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .copy-btn:hover { opacity: 0.9; }
+  .requirement {
+    margin-top: 10px;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 640px) { .steps { grid-template-columns: repeat(2, 1fr); } }
+  .step {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 14px;
+    text-align: center;
+    font-size: 0.9rem;
+  }
+  .step .num {
+    display: inline-block;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 22px;
+    margin-bottom: 8px;
+  }
+
+  .notice {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    font-size: 0.9rem;
+  }
+  .notice ul { margin: 8px 0 0; padding-left: 20px; }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+  }
+  footer a { color: var(--accent); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <img src="wingvox_bird.png" alt="WingVox logo">
+    <h1>WingVox</h1>
+    <p class="tagline">Hold Right Option, speak, release. Local, offline voice dictation for macOS &mdash; nothing leaves your Mac.</p>
+  </header>
+
+  <section>
+    <h2>Install</h2>
+    <div class="install-box">
+      <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash</code>
+      <button class="copy-btn" onclick="copyInstall()">Copy</button>
+    </div>
+    <p class="requirement">Requires an Apple Silicon Mac (M1/M2/M3/M4). Paste this into Terminal &mdash; it sets up everything needed and takes a few minutes.</p>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step"><span class="num">1</span><br>Hold Right Option and speak</div>
+      <div class="step"><span class="num">2</span><br>Whisper transcribes on-device</div>
+      <div class="step"><span class="num">3</span><br>A local LLM cleans it up</div>
+      <div class="step"><span class="num">4</span><br>Pastes into whatever's focused</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Before you install</h2>
+    <div class="notice">
+      This is a personal project, shared as-is in case it's useful to others, not a polished
+      product with official support. Worth knowing before you run the command above:
+      <ul>
+        <li>It requests <strong>Microphone</strong>, <strong>Accessibility</strong>, and <strong>Input Monitoring</strong> permissions &mdash; needed to capture audio and paste text into other apps.</li>
+        <li>It installs Homebrew, Xcode Command Line Tools, and Ollama if they're missing on your Mac.</li>
+        <li>All transcription and text cleanup happen locally &mdash; no audio or text is sent anywhere.</li>
+      </ul>
+      Prefer to read the code first? See the
+      <a href="https://github.com/bogin43/wingvox">source and full README on GitHub</a>.
+    </div>
+  </section>
+
+  <footer>
+    <a href="https://github.com/bogin43/wingvox">Source on GitHub</a> &middot; MIT licensed
+  </footer>
+
+</div>
+
+<script>
+function copyInstall() {
+  const text = document.getElementById('install-cmd').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    const original = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  });
+}
+</script>
+
+</body>
+</html>
