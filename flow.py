@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Wingvox: hold Right Option, speak, release -> cleaned text
-is pasted into whatever app has focus. 100% offline.
+"""Wingvox: hold the dictation hotkey (Right Option on Mac, Right Alt on
+Windows), speak, release -> cleaned text is pasted into whatever app has
+focus. 100% offline.
 
 Usage:
   python flow.py              run the push-to-talk app
@@ -10,18 +11,18 @@ Usage:
   python flow.py add-correction "wrong text" "right text"   fix a recurring mis-transcription
 """
 
-import fcntl
 import os
 import platform
 import re
-import subprocess
 import sys
 import threading
 import time
 import types
 from pathlib import Path
 
-if platform.machine() != "arm64":
+import platform_compat as pc
+
+if pc.IS_MAC and platform.machine() != "arm64":
     sys.exit(
         f"Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4). This Mac "
         f"reports '{platform.machine()}', which mlx (the ML framework "
@@ -30,58 +31,71 @@ if platform.machine() != "arm64":
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-# mlx_whisper unconditionally imports numba + scipy.signal at module load
-# (mlx_whisper/timing.py, for its word-timestamp alignment feature), even
-# though flow.py never passes word_timestamps=True and that code path is
-# never reached. That's ~250MB of packages just to satisfy an unused import
-# chain. These stubs provide just enough surface — a passthrough JIT
-# decorator, an empty scipy.signal — for the import to succeed without
-# installing the real packages. Must run before mlx_whisper is ever
-# imported (it's imported lazily inside transcribe()).
-_fake_numba = types.ModuleType("numba")
-_fake_numba.jit = lambda *a, **kw: (lambda f: f)
-sys.modules.setdefault("numba", _fake_numba)
+if pc.IS_MAC:
+    # mlx_whisper unconditionally imports numba + scipy.signal at module load
+    # (mlx_whisper/timing.py, for its word-timestamp alignment feature), even
+    # though flow.py never passes word_timestamps=True and that code path is
+    # never reached. That's ~250MB of packages just to satisfy an unused
+    # import chain. These stubs provide just enough surface — a passthrough
+    # JIT decorator, an empty scipy.signal — for the import to succeed
+    # without installing the real packages. Must run before mlx_whisper is
+    # ever imported (it's imported lazily inside stt_mac.run_model()).
+    _fake_numba = types.ModuleType("numba")
+    _fake_numba.jit = lambda *a, **kw: (lambda f: f)
+    sys.modules.setdefault("numba", _fake_numba)
 
-_fake_scipy = types.ModuleType("scipy")
-_fake_scipy_signal = types.ModuleType("scipy.signal")
-_fake_scipy.signal = _fake_scipy_signal
-sys.modules.setdefault("scipy", _fake_scipy)
-sys.modules.setdefault("scipy.signal", _fake_scipy_signal)
+    _fake_scipy = types.ModuleType("scipy")
+    _fake_scipy_signal = types.ModuleType("scipy.signal")
+    _fake_scipy.signal = _fake_scipy_signal
+    sys.modules.setdefault("scipy", _fake_scipy)
+    sys.modules.setdefault("scipy.signal", _fake_scipy_signal)
 
 import numpy as np
 import requests
 import sounddevice as sd
 from pynput import keyboard
 
-SAMPLE_RATE = 16000
-WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
+if pc.IS_MAC:
+    import stt_mac as stt
+else:
+    import stt_windows as stt
 
-# Only force offline mode if the model is already cached — on a fresh
-# install nothing is cached yet, and HF_HUB_OFFLINE=1 would make the first
-# download attempt fail outright instead of fetching it. Must still run
-# before mlx_whisper's first import (transcribe(), further below).
-try:
-    from huggingface_hub.file_download import repo_folder_name
-    _cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / repo_folder_name(
-        repo_id=WHISPER_REPO, repo_type="model"
-    )
-    if _cache_dir.exists():
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-except Exception:
-    pass  # fail open: leave online so a real download can proceed
+SAMPLE_RATE = 16000
+
+if pc.IS_MAC:
+    # Only force offline mode if the model is already cached — on a fresh
+    # install nothing is cached yet, and HF_HUB_OFFLINE=1 would make the
+    # first download attempt fail outright instead of fetching it. Must
+    # still run before mlx_whisper's first import (stt_mac.run_model()).
+    # faster-whisper on Windows manages its own HF cache without this.
+    try:
+        from huggingface_hub.file_download import repo_folder_name
+        _cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / repo_folder_name(
+            repo_id=stt.WHISPER_REPO, repo_type="model"
+        )
+        if _cache_dir.exists():
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    except Exception:
+        pass  # fail open: leave online so a real download can proceed
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "qwen2.5:3b"
-HOTKEY = keyboard.Key.alt_r  # hold Right Option to talk
+HOTKEY_LABEL = "Right Option" if pc.IS_MAC else "Right Alt"
 # Always record from the built-in mic, not whatever the system default input is
 # (e.g. Bluetooth headphones, which often sound worse for dictation).
 # Override with WINGVOX_INPUT_DEVICE if you ever want a different mic.
-PREFERRED_INPUT_DEVICE = os.environ.get("WINGVOX_INPUT_DEVICE") or "MacBook Air Microphone"
+PREFERRED_INPUT_DEVICE = os.environ.get("WINGVOX_INPUT_DEVICE") or (
+    "MacBook Air Microphone" if pc.IS_MAC else None
+)
 
 
-def resolve_input_device(name_substring: str):
+def resolve_input_device(name_substring):
     """Return the device index whose name contains name_substring, or None
-    (system default) if no match is found."""
+    (system default) if no match is found. name_substring is None on
+    Windows, where there's no universal built-in-mic name to match --
+    prefer WASAPI's default input over PortAudio's own default (often MME)."""
+    if not name_substring:
+        return pc.default_windows_input_device(sd)
     try:
         for i, d in enumerate(sd.query_devices()):
             if d["max_input_channels"] > 0 and name_substring.lower() in d["name"].lower():
@@ -90,9 +104,10 @@ def resolve_input_device(name_substring: str):
         pass
     print(f"  ⚠ input device '{name_substring}' not found, using system default", file=sys.stderr)
     return None
-DICT_PATH = Path(__file__).parent / "dictionary.txt"
-CORRECTIONS_PATH = Path(__file__).parent / "corrections.txt"
-LOCK_PATH = Path(__file__).parent / "wingvox.lock"
+DICT_PATH = pc.data_dir() / "dictionary.txt"
+CORRECTIONS_PATH = pc.data_dir() / "corrections.txt"
+LOCK_PATH = pc.data_dir() / "wingvox.lock"
+LOG_PATH = pc.data_dir() / "wingvox.log"
 
 CLEANUP_SYSTEM_PROMPT = """You are a strict dictation cleanup filter, not a writing assistant and not \
 a conversational assistant. You will be given a raw voice-dictation transcript wrapped in <transcript> \
@@ -169,6 +184,17 @@ def ensure_microphone_access(timeout=30) -> bool:
     Privacy & Security > Microphone entry. Requesting access through
     AVFoundation first forces the real system prompt so there's something to
     grant in Settings."""
+    if not pc.IS_MAC:
+        # No AVFoundation equivalent on Windows and no public API to query
+        # or trigger the Settings > Privacy > Microphone consent flow.
+        # Attempt a real check instead of blindly returning True; on
+        # failure, deep-link into the right Settings page.
+        try:
+            sd.check_input_settings()
+            return True
+        except Exception:
+            pc.open_privacy_settings("microphone")
+            return False
     try:
         from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
     except Exception as e:
@@ -198,6 +224,15 @@ def ensure_accessibility_access() -> bool:
     depend on Accessibility trust. Unlike the mic check, AXIsProcessTrusted()
     doesn't trigger a system prompt — it can only report whether trust has
     already been granted manually in System Settings."""
+    if not pc.IS_MAC:
+        # No Windows analogue of macOS's AX/TCC trust gate — pynput's
+        # global low-level keyboard hook works for a normal-privilege
+        # interactive process with no manifest/elevation needed. Two real
+        # caveats that no code can detect or fix: some AV/EDR products flag
+        # global keyboard hooks as suspicious, and Windows' UIPI blocks the
+        # simulated paste from reaching any window running elevated (Task
+        # Manager, an admin terminal) — see SETUP.md.
+        return True
     try:
         import HIServices
         return bool(HIServices.AXIsProcessTrusted())
@@ -247,8 +282,6 @@ class Recorder:
 
 # ---------- Stage 2: speech-to-text ----------
 
-_whisper_lock = threading.Lock()
-
 def apply_corrections(text: str, corrections: list) -> str:
     for wrong, right in corrections:
         text = re.sub(r"\b" + re.escape(wrong) + r"\b", right, text, flags=re.IGNORECASE)
@@ -260,20 +293,15 @@ def transcribe(audio: np.ndarray, dictionary: str, corrections: list = ()) -> st
         return ""
     if float(np.sqrt(np.mean(audio**2))) < 0.001:  # silence: whisper would hallucinate
         return ""
-    import mlx_whisper
     prompt = f"Glossary: {dictionary}." if dictionary else None
-    with _whisper_lock:
-        result = mlx_whisper.transcribe(
-            audio, path_or_hf_repo=WHISPER_REPO, initial_prompt=prompt,
-            language="en", fp16=True, condition_on_previous_text=False,
-        )
+    segments = stt.run_model(audio, prompt)
     # keep only segments whisper itself is confident contain real speech,
     # and drop any individual segment that looks like a glossary-prompt
     # echo — checked per-segment (not just on the final joined text) so a
     # short hallucinated segment gets caught even when it's buried inside
     # an otherwise long, legitimate multi-sentence dictation.
     parts = [
-        seg["text"] for seg in result["segments"]
+        seg["text"] for seg in segments
         if seg.get("no_speech_prob", 0) < 0.6 and seg.get("compression_ratio", 0) < 2.4
         and not (prompt and _looks_like_prompt_echo(seg["text"], prompt))
     ]
@@ -413,19 +441,19 @@ def inject(text: str):
     # garbage, so use plain ASCII dots, which can't be mis-encoded.
     text = text.replace("…", "...")
     try:
-        prev_clipboard = subprocess.run(["pbpaste"], capture_output=True).stdout
+        prev_clipboard = pc.clipboard_get()
     except Exception:
         prev_clipboard = None
-    subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+    pc.clipboard_set(text)
     time.sleep(0.05)
-    with _kb.pressed(keyboard.Key.cmd):
+    with _kb.pressed(pc.PASTE_MODIFIER):
         _kb.press("v")
         _kb.release("v")
     if prev_clipboard is not None:
         def _restore():
             time.sleep(0.4)  # let the paste land before putting the old clipboard back
             try:
-                subprocess.run(["pbcopy"], input=prev_clipboard, check=True)
+                pc.clipboard_set(prev_clipboard)
             except Exception:
                 pass
         threading.Thread(target=_restore, daemon=True).start()
@@ -442,29 +470,34 @@ def acquire_single_instance_lock() -> bool:
     there's no stale-lock cleanup to get wrong."""
     global _lock_file
     _lock_file = open(LOCK_PATH, "w")
-    try:
-        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        _lock_file.close()
-        _lock_file = None
-        return False
-    _lock_file.write(str(os.getpid()))
-    _lock_file.flush()
-    return True
+    if pc.lock_exclusive_nb(_lock_file):
+        return True
+    _lock_file.close()
+    _lock_file = None
+    return False
 
 
 def run():
     if not acquire_single_instance_lock():
         print("  ⚠ Wingvox is already running (another instance holds the lock). Exiting.")
         sys.exit(0)
+    if pc.IS_WINDOWS:
+        pc.setup_windows_console_log(LOG_PATH)
     dictionary = load_dictionary()
     corrections = load_corrections()
     print("  Requesting microphone access…")
     if not ensure_microphone_access():
-        print("  ⚠ Microphone access not granted. Enable Wingvox in "
-              "System Settings > Privacy & Security > Microphone, then restart.")
+        if pc.IS_MAC:
+            print("  ⚠ Microphone access not granted. Enable Wingvox in "
+                  "System Settings > Privacy & Security > Microphone, then restart.")
+        else:
+            print("  ⚠ Microphone access not granted. Enable it in "
+                  "Settings > Privacy & security > Microphone, then restart.")
     try:
-        from overlay import StatusOverlay, run_event_loop
+        if pc.IS_MAC:
+            from overlay_mac import StatusOverlay, run_event_loop
+        else:
+            from overlay_windows import StatusOverlay, run_event_loop
         overlay = StatusOverlay()
     except Exception as e:
         print(f"overlay unavailable ({e}), running terminal-only", file=sys.stderr)
@@ -492,8 +525,9 @@ def run():
             return
         if not ollama_available():
             state["warm"] = True
-            status("⚠ Ollama not running — will paste raw transcripts "
-                   "(fix: brew services start ollama)", "orange", hide_after=10)
+            ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
+            status(f"⚠ Ollama not running — will paste raw transcripts "
+                   f"(fix: {ollama_hint})", "orange", hide_after=10)
         elif not ollama_model_pulled():
             state["warm"] = True
             status(f"⚠ Ollama model not pulled — will paste raw transcripts "
@@ -502,7 +536,7 @@ def run():
             status("Warming up cleanup model…", "gray")
             warm_up_llm()
             state["warm"] = True
-            status("✓ Ready — hold Right Option to dictate", "green", hide_after=3)
+            status(f"✓ Ready — hold {HOTKEY_LABEL} to dictate", "green", hide_after=3)
 
     def process(audio: np.ndarray):
         t0 = time.time()
@@ -537,7 +571,7 @@ def run():
         print(f"  latency: stt {t1-t0:.2f}s + cleanup {t2-t1:.2f}s = {time.time()-t0:.2f}s")
 
     def on_press(key):
-        if key != HOTKEY:
+        if key not in pc.HOTKEY_KEYS:
             return
         if not state["recording"]:
             state["recording"] = True
@@ -555,10 +589,10 @@ def run():
             # captured is discarded, not transcribed.
             state["recording"] = False
             recorder.stop()
-            status("✕ Canceled — press Right Option to try again", "orange", hide_after=2)
+            status(f"✕ Canceled — press {HOTKEY_LABEL} to try again", "orange", hide_after=2)
 
     def on_release(key):
-        if key == HOTKEY and state["recording"]:
+        if key in pc.HOTKEY_KEYS and state["recording"]:
             state["recording"] = False
             audio = recorder.stop()
             print(f"○ {len(audio)/SAMPLE_RATE:.1f}s captured")
@@ -582,9 +616,13 @@ def run():
         on_release=_guarded("on_release", on_release),
     )
     listener.start()
-    print("Hold RIGHT OPTION to dictate into any app. Ctrl+C here to quit.")
-    print("If nothing happens: System Settings > Privacy & Security >")
-    print("  grant your terminal app Microphone, Accessibility, and Input Monitoring.")
+    print(f"Hold {HOTKEY_LABEL.upper()} to dictate into any app. Ctrl+C here to quit.")
+    if pc.IS_MAC:
+        print("If nothing happens: System Settings > Privacy & Security >")
+        print("  grant your terminal app Microphone, Accessibility, and Input Monitoring.")
+    else:
+        print("If nothing happens: check Settings > Privacy & security > Microphone,")
+        print("  and make sure no antivirus/EDR software is blocking the global hotkey.")
     if run_event_loop:
         run_event_loop()  # blocks; required for the overlay
     else:

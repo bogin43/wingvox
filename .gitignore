@@ -7,6 +7,9 @@ dictionary.txt
 corrections.txt
 wingvox.log
 wingvox.lock
+# Generated from wingvox_task.xml.template by install.ps1 (has this
+# machine's absolute paths baked in) -- the template itself stays tracked.
+wingvox_task.xml
 
 # Python/OS cruft
 __pycache__/

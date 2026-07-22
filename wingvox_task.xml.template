@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!-- Wingvox Task Scheduler definition -- the Windows analogue of
+     com.broganwilliams.wingvox.plist.template. Registered by install.ps1 via:
+       schtasks /create /tn Wingvox /xml wingvox_task.xml /f
+     __EXE_PATH__ and __REPO_DIR__ are substituted by install.ps1.
+
+     A LogonTrigger (not "run whether user is logged on or not") is
+     deliberate: it runs the task inside the actual interactive session,
+     with the same mic/keyboard/paste access as any app the user
+     double-clicks. A true Windows Service runs in Session 0, which has
+     been isolated from the interactive desktop since Vista specifically
+     so services can't touch user input/UI -- it could not see the
+     mic-permission-gated session or inject keystrokes into the user's
+     foreground app. RunLevel=LeastPrivilege keeps this a normal-privilege
+     process (no UAC prompt) -- an elevated Wingvox couldn't paste into
+     ordinary, non-elevated windows anyway (Windows' UIPI blocks it). -->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Wingvox push-to-talk dictation background service</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__EXE_PATH__</Command>
+      <WorkingDirectory>__REPO_DIR__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

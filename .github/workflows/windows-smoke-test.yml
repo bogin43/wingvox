@@ -1,0 +1,80 @@
+name: Windows smoke test
+
+# Runs the parts of the Windows port that CAN be verified without real
+# hardware or a live user: package installs, module imports, the
+# PyInstaller build, and PowerShell/XML syntax. It deliberately does NOT
+# (and can't) test the mic, the global hotkey, the overlay rendering, or
+# Task Scheduler registration -- those need a real interactive Windows
+# session. windows-latest runners are x64, so this doesn't exercise the
+# ARM64-wheel handling install.ps1 does for faster-whisper's ctranslate2
+# dependency either -- that still needs an actual ARM64 Windows VM/machine.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "flow.py"
+      - "platform_compat.py"
+      - "stt_windows.py"
+      - "overlay_windows.py"
+      - "wingvox.spec"
+      - "requirements.txt"
+      - "install.ps1"
+      - "bootstrap.ps1"
+      - "wingvox_task.xml.template"
+      - ".github/workflows/windows-smoke-test.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile every module (catches syntax errors)
+        run: python -m py_compile flow.py platform_compat.py stt_windows.py overlay_windows.py
+
+      - name: Import Windows-only modules and their third-party deps
+        run: python -c "import platform_compat, stt_windows, overlay_windows, faster_whisper, pyperclip; print('imports OK')"
+
+      - name: Build with PyInstaller
+        run: pyinstaller wingvox.spec
+
+      - name: Verify the exe was produced
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist\Wingvox\Wingvox.exe")) {
+            Write-Error "PyInstaller did not produce dist\Wingvox\Wingvox.exe"
+            exit 1
+          }
+          Write-Host "Built dist\Wingvox\Wingvox.exe successfully"
+
+      - name: Validate wingvox_task.xml.template is well-formed
+        shell: pwsh
+        run: |
+          [xml](Get-Content wingvox_task.xml.template -Raw) | Out-Null
+          Write-Host "wingvox_task.xml.template is well-formed XML"
+
+      - name: Parse-check install.ps1 and bootstrap.ps1 (syntax only, no execution)
+        shell: pwsh
+        run: |
+          foreach ($f in @("install.ps1", "bootstrap.ps1")) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              Write-Error "$f has $($errors.Count) parse error(s):`n$($errors -join "`n")"
+              exit 1
+            }
+            Write-Host "$f parses cleanly"
+          }

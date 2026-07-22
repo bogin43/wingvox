@@ -1,35 +1,51 @@
-mlx-whisper
+# Shared across every platform.
 sounddevice
 pynput
 requests
+
+# ---------- macOS ----------
+
+mlx-whisper; sys_platform == "darwin"
 
 # Needed to build Wingvox.app (setup.py's py2app step). Installed explicitly
 # here rather than relying on setuptools' `setup_requires` auto-fetch, which
 # uses a deprecated "egg" mechanism that fails to pull in py2app's own
 # dependencies (modulegraph, macholib) correctly in this environment.
-py2app
+py2app; sys_platform == "darwin"
 
 # macOS system framework bindings: AVFoundation (explicit mic-permission
 # prompt), ApplicationServices/HIServices (AXIsProcessTrusted Accessibility
 # check), Cocoa/Quartz/CoreText (the overlay waveform window), CoreAudio/
 # CoreMedia (sounddevice/AVFoundation support). Pinned to the exact version
 # verified working in development.
-pyobjc-core==12.2.1
-pyobjc-framework-Cocoa==12.2.1
-pyobjc-framework-Quartz==12.2.1
-pyobjc-framework-ApplicationServices==12.2.1
-pyobjc-framework-AVFoundation==12.2.1
-pyobjc-framework-CoreAudio==12.2.1
-pyobjc-framework-CoreMedia==12.2.1
-pyobjc-framework-CoreText==12.2.1
+pyobjc-core==12.2.1; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.1; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.2.1; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices==12.2.1; sys_platform == "darwin"
+pyobjc-framework-AVFoundation==12.2.1; sys_platform == "darwin"
+pyobjc-framework-CoreAudio==12.2.1; sys_platform == "darwin"
+pyobjc-framework-CoreMedia==12.2.1; sys_platform == "darwin"
+pyobjc-framework-CoreText==12.2.1; sys_platform == "darwin"
 
 # install.sh runs the following automatically after the above — documented
 # here for anyone installing manually with `pip install -r requirements.txt`:
 #   pip uninstall -y torch numba scipy llvmlite
-# mlx-whisper declares these as dependencies but flow.py's code path never
+# mlx-whisper declares these as dependencies but stt_mac.py's code path never
 # needs them: torch is never imported at all, and numba/scipy/llvmlite are
 # only pulled in by mlx_whisper's unused word-timestamps feature (see the
 # sys.modules stub near the top of flow.py, which fakes just enough of
 # numba/scipy for that import to succeed without installing the real ~250MB
 # packages). If a future mlx-whisper update changes timing.py's imports,
 # this stub may need updating — it'll fail loudly (ImportError) if so.
+
+# ---------- Windows ----------
+
+# faster-whisper (CTranslate2) STT backend — see stt_windows.py. Its
+# ctranslate2 dependency only publishes win_amd64 wheels, not win_arm64 —
+# install.ps1 forces an x64 Python install for this reason, even on ARM64
+# Windows machines (which run x64 fine under emulation).
+faster-whisper; sys_platform == "win32"
+# Cross-platform clipboard, used in place of pbcopy/pbpaste.
+pyperclip; sys_platform == "win32"
+# Needed to build Wingvox's onedir .exe (install.ps1's PyInstaller step).
+pyinstaller; sys_platform == "win32"

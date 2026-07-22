@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wingvox — fully offline voice dictation</title>
-<meta name="description" content="Hold Right Option, speak, release. Fully offline voice dictation that runs entirely on your device.">
+<meta name="description" content="Hold your hotkey, speak, release. Fully offline voice dictation that runs entirely on your device.">
 <style>
   :root {
     color-scheme: light dark;
@@ -60,6 +60,28 @@
   section { margin-bottom: 40px; }
   h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 12px; }
 
+  .os-tabs {
+    display: inline-flex;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px;
+    margin-bottom: 12px;
+  }
+  .os-tab {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .os-tab.active {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
   .install-box {
     background: var(--code-bg);
     color: var(--code-fg);
@@ -139,22 +161,26 @@
   <header class="hero">
     <img src="wingvox_bird.png" alt="Wingvox logo">
     <h1>Wingvox</h1>
-    <p class="tagline">Hold Right Option, speak, release. Fully offline voice dictation that runs entirely on your device &mdash; nothing leaves it.</p>
+    <p class="tagline">Hold your dictation hotkey, speak, release. Fully offline voice dictation that runs entirely on your device &mdash; nothing leaves it.</p>
   </header>
 
   <section>
     <h2>Install</h2>
+    <div class="os-tabs" role="tablist">
+      <button class="os-tab" data-os="mac" onclick="selectOS('mac')" role="tab">Mac</button>
+      <button class="os-tab" data-os="windows" onclick="selectOS('windows')" role="tab">Windows</button>
+    </div>
     <div class="install-box">
-      <code id="install-cmd">curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash</code>
+      <code id="install-cmd"></code>
       <button class="copy-btn" onclick="copyInstall()">Copy</button>
     </div>
-    <p class="requirement">Requires an Apple Silicon Mac (M1/M2/M3/M4). Paste this into Terminal &mdash; it sets up everything needed and takes a few minutes.</p>
+    <p class="requirement" id="install-requirement"></p>
   </section>
 
   <section>
     <h2>How it works</h2>
     <div class="steps">
-      <div class="step"><span class="num">1</span><br>Hold Right Option and speak</div>
+      <div class="step"><span class="num">1</span><br>Hold your hotkey and speak</div>
       <div class="step"><span class="num">2</span><br>Audio is transcribed on-device</div>
       <div class="step"><span class="num">3</span><br>A local LLM cleans it up</div>
       <div class="step"><span class="num">4</span><br>Pastes wherever your cursor is focused</div>
@@ -166,11 +192,7 @@
     <div class="notice">
       This is a personal project, shared as-is in case it's useful to others, not a polished
       product with official support. Worth knowing before you run the command above:
-      <ul>
-        <li>It requests <strong>Microphone</strong>, <strong>Accessibility</strong>, and <strong>Input Monitoring</strong> permissions &mdash; needed to capture audio and paste text into other apps.</li>
-        <li>It installs Homebrew, Xcode Command Line Tools, and Ollama if they're missing on your Mac.</li>
-        <li>Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it's all private.</li>
-      </ul>
+      <ul id="install-notice"></ul>
       Prefer to read the code first? See the
       <a href="https://github.com/bogin43/wingvox">source and full README on GitHub</a>.
     </div>
@@ -183,6 +205,39 @@
 </div>
 
 <script>
+const OS_DATA = {
+  mac: {
+    cmd: 'curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash',
+    requirement: 'Requires an Apple Silicon Mac (M1/M2/M3/M4). Paste this into Terminal — it sets up everything needed and takes a few minutes.',
+    notice: [
+      'It requests <strong>Microphone</strong>, <strong>Accessibility</strong>, and <strong>Input Monitoring</strong> permissions &mdash; needed to capture audio and paste text into other apps.',
+      'It installs Homebrew, Xcode Command Line Tools, and Ollama if they’re missing on your Mac.',
+      'Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it’s all private.'
+    ]
+  },
+  windows: {
+    cmd: 'irm https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.ps1 | iex',
+    requirement: 'Requires Windows 10/11 with winget. Paste this into PowerShell — it sets up everything needed and takes a few minutes.',
+    notice: [
+      'It requests <strong>Microphone</strong> access &mdash; needed to capture audio.',
+      'The first launch shows a SmartScreen warning since this build isn’t code-signed yet &mdash; click "More info" then "Run anyway".',
+      'It installs Ollama and Python if they’re missing.',
+      'Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it’s all private.',
+      'Windows support is new — if you hit an issue, please report it on GitHub.'
+    ]
+  }
+};
+
+function selectOS(os) {
+  const data = OS_DATA[os];
+  document.getElementById('install-cmd').textContent = data.cmd;
+  document.getElementById('install-requirement').textContent = data.requirement;
+  document.getElementById('install-notice').innerHTML = data.notice.map(n => `<li>${n}</li>`).join('');
+  document.querySelectorAll('.os-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.os === os);
+  });
+}
+
 function copyInstall() {
   const text = document.getElementById('install-cmd').textContent;
   navigator.clipboard.writeText(text).then(() => {
@@ -192,6 +247,8 @@ function copyInstall() {
     setTimeout(() => { btn.textContent = original; }, 1500);
   });
 }
+
+selectOS(/Win/i.test(navigator.userAgent) ? 'windows' : 'mac');
 </script>
 
 </body>
