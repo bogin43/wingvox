@@ -62,6 +62,42 @@ else:
 
 SAMPLE_RATE = 16000
 
+# Longest single dictation to keep, in samples. Past this the recorder stops
+# accumulating rather than growing without bound (see Recorder._callback).
+MAX_RECORDING_SECONDS = float(os.environ.get("WINGVOX_MAX_RECORDING_SECONDS", "180"))
+MAX_RECORDING_SAMPLES = int(SAMPLE_RATE * MAX_RECORDING_SECONDS)
+
+# Whisper's initial_prompt is capped at 224 tokens and silently truncates
+# past that, so an over-long glossary both stops helping and starts crowding
+# out the real prompt. Keep the glossary well inside that budget.
+MAX_GLOSSARY_CHARS = 600
+
+# WASAPI shared-mode streams normally require an exact match to the device's
+# current mix format, which some drivers -- notably virtual/VM audio devices
+# -- reject outright for 16kHz float32 (AUDCLNT_E_UNSUPPORTED_FORMAT), even
+# at their own reported native rate. auto_convert hands rate/format
+# conversion to WASAPI's own audio engine instead of requiring an exact
+# match. WasapiSettings is meaningless on Mac's CoreAudio host API.
+_WASAPI_SETTINGS = sd.WasapiSettings(auto_convert=True) if pc.IS_WINDOWS else None
+
+
+def _wasapi_hostapi_index():
+    """PortAudio raises -9984 (Incompatible host API specific stream info)
+    if WasapiSettings is passed to a non-WASAPI device (WDM-KS, MME,
+    DirectSound), which the multi-device fallback in Recorder.start() below
+    can land on. Resolve WASAPI's host API index once so extra_settings can
+    be scoped to only the devices it actually applies to."""
+    try:
+        for idx, api in enumerate(sd.query_hostapis()):
+            if "WASAPI" in api["name"]:
+                return idx
+    except Exception:
+        pass
+    return None
+
+
+_WASAPI_HOSTAPI_INDEX = _wasapi_hostapi_index() if pc.IS_WINDOWS else None
+
 if pc.IS_MAC:
     # Only force offline mode if the model is already cached — on a fresh
     # install nothing is cached yet, and HF_HUB_OFFLINE=1 would make the
@@ -78,7 +114,10 @@ if pc.IS_MAC:
     except Exception:
         pass  # fail open: leave online so a real download can proceed
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+# 127.0.0.1, not localhost -- Windows can resolve "localhost" via IPv6 first
+# and stall before falling back to IPv4 (the same issue install.ps1's own
+# Ollama health check hit and was fixed for; this call site was missed).
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OLLAMA_MODEL = "qwen2.5:3b"
 HOTKEY_LABEL = "Right Option" if pc.IS_MAC else "Right Alt"
 # Always record from the built-in mic, not whatever the system default input is
@@ -240,51 +279,142 @@ def ensure_accessibility_access() -> bool:
         return True  # can't determine — fail open rather than false-alarm
 
 
+def _resample(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
+    """Plain linear-interpolation resampler -- avoids pulling in real scipy
+    (flow.py stubs out scipy.signal specifically so mlx_whisper's unused
+    word-timestamp import chain doesn't require the real ~250MB package).
+    Only exercised on the rate-mismatch fallback path, and speech-to-text
+    tolerates minor resampling artifacts fine."""
+    if orig_rate == target_rate or len(audio) == 0:
+        return audio
+    duration = len(audio) / orig_rate
+    target_len = int(round(duration * target_rate))
+    orig_times = np.linspace(0, duration, len(audio), endpoint=False)
+    target_times = np.linspace(0, duration, target_len, endpoint=False)
+    return np.interp(target_times, orig_times, audio).astype(np.float32)
+
+
 class Recorder:
     def __init__(self, on_level=None):
         self._frames = []
         self._stream = None
+        self._native_rate = SAMPLE_RATE
         self._lock = threading.Lock()
         self._on_level = on_level
 
     def start(self):
         with self._lock:
             self._frames = []
-            device = resolve_input_device(PREFERRED_INPUT_DEVICE)
+            self._native_rate = SAMPLE_RATE
+            preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
 
             def _callback(indata, *_):
+                # Cap what a single recording can accumulate. A hotkey that
+                # never delivers its release (the watchdog covers the common
+                # case, but a genuinely stuck physical key doesn't look "up"
+                # to GetAsyncKeyState either) would otherwise grow this list
+                # for as long as the process runs, and then hand Whisper an
+                # hours-long clip to chew through.
+                if len(self._frames) * indata.shape[0] >= MAX_RECORDING_SAMPLES:
+                    return
                 self._frames.append(indata.copy())
                 if self._on_level:
                     self._on_level(float(np.sqrt(np.mean(indata**2))))
 
-            try:
-                self._stream = sd.InputStream(
-                    device=device,
-                    samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                    callback=_callback,
+            def _open(device, rate):
+                dev_index = device if device is not None else sd.default.device[0]
+                is_wasapi = (
+                    _WASAPI_HOSTAPI_INDEX is not None
+                    and sd.query_devices(dev_index)["hostapi"] == _WASAPI_HOSTAPI_INDEX
                 )
-                self._stream.start()
-            except Exception:
-                self._stream = None
-                raise
+                stream = sd.InputStream(
+                    device=device,
+                    samplerate=rate, channels=1, dtype="float32",
+                    callback=_callback,
+                    extra_settings=_WASAPI_SETTINGS if is_wasapi else None,
+                )
+                stream.start()
+                return stream
+
+            # A virtual/VM audio device can fail in several different, even
+            # inconsistent-across-runs ways (invalid sample rate, a format
+            # WASAPI's shared-mode engine rejects, a WDM-KS driver ioctl
+            # error) -- rather than betting everything on the one
+            # "preferred" device, fall through every other available input
+            # device (each tried at 16kHz, then its own native rate) until
+            # one actually opens.
+            candidates = [preferred]
+            if pc.IS_WINDOWS:
+                try:
+                    candidates += [
+                        i for i, d in enumerate(sd.query_devices())
+                        if d["max_input_channels"] > 0 and i != preferred
+                    ]
+                except Exception:
+                    pass
+
+            last_error = None
+            for device in candidates:
+                try:
+                    self._native_rate = SAMPLE_RATE
+                    self._stream = _open(device, SAMPLE_RATE)
+                    return
+                except sd.PortAudioError as e:
+                    last_error = e
+                try:
+                    info = sd.query_devices(
+                        device if device is not None else sd.default.device[0], "input"
+                    )
+                    self._native_rate = int(info["default_samplerate"])
+                    self._stream = _open(device, self._native_rate)
+                    return
+                except Exception as e:
+                    last_error = e
+            self._stream = None
+            raise last_error
 
     def stop(self) -> np.ndarray:
         with self._lock:
             if self._stream is None:
                 return np.zeros(0, dtype=np.float32)
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            # Clear self._stream before attempting to actually stop/close it,
+            # not after -- on a flaky driver (this session directly hit
+            # WDM-KS ioctl errors) stream.stop()/close() can raise, and if
+            # self._stream were only cleared on the success path, the next
+            # start() would silently overwrite the reference to this broken
+            # stream without ever closing it: an orphaned stream with its mic
+            # handle never released, which can make the next recording fail
+            # to acquire the microphone at all. Best-effort cleanup instead.
+            stream, self._stream = self._stream, None
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
             if not self._frames:
                 return np.zeros(0, dtype=np.float32)
-            return np.concatenate(self._frames)[:, 0]
+            audio = np.concatenate(self._frames)[:, 0]
+            if self._native_rate != SAMPLE_RATE:
+                audio = _resample(audio, self._native_rate, SAMPLE_RATE)
+            return audio
 
 
 # ---------- Stage 2: speech-to-text ----------
 
 def apply_corrections(text: str, corrections: list) -> str:
     for wrong, right in corrections:
-        text = re.sub(r"\b" + re.escape(wrong) + r"\b", right, text, flags=re.IGNORECASE)
+        # \b only means "word boundary" next to a word character, so wrapping
+        # a term that starts or ends with punctuation (C++, .NET, Node.js)
+        # in \b...\b makes it match nothing at all -- exactly the technical
+        # terms most likely to end up in corrections.txt. Only apply each
+        # boundary on the side where it can actually do its job.
+        prefix = r"\b" if wrong[:1].isalnum() or wrong[:1] == "_" else ""
+        suffix = r"\b" if wrong[-1:].isalnum() or wrong[-1:] == "_" else ""
+        text = re.sub(prefix + re.escape(wrong) + suffix, right, text,
+                      flags=re.IGNORECASE)
     return text
 
 
@@ -293,7 +423,13 @@ def transcribe(audio: np.ndarray, dictionary: str, corrections: list = ()) -> st
         return ""
     if float(np.sqrt(np.mean(audio**2))) < 0.001:  # silence: whisper would hallucinate
         return ""
-    prompt = f"Glossary: {dictionary}." if dictionary else None
+    # Trim to whole terms rather than mid-word: Whisper truncates the
+    # initial_prompt at 224 tokens on its own, and a half-written name is
+    # worse than no name (it biases toward a word that doesn't exist).
+    glossary = dictionary
+    if len(glossary) > MAX_GLOSSARY_CHARS:
+        glossary = glossary[:MAX_GLOSSARY_CHARS].rsplit(",", 1)[0]
+    prompt = f"Glossary: {glossary}." if glossary else None
     segments = stt.run_model(audio, prompt)
     # keep only segments whisper itself is confident contain real speech,
     # and drop any individual segment that looks like a glossary-prompt
@@ -359,20 +495,69 @@ def _looks_like_prompt_echo(text: str, prompt: str) -> bool:
     return "glossary" in clean_words or (matches == len(clean_words) and matches >= 3)
 
 
+# Small local models have been directly observed (qwen2.5:1.5b, in testing)
+# swapping a pronoun or dropping a negation while otherwise leaving a
+# sentence untouched -- e.g. "a good way for me to make" -> "a good way for
+# you to create". That kind of one-word substitution barely moves the
+# word-overlap ratio (still ~90%+ on a typical sentence) but silently
+# flips what the speaker actually said. Word overlap alone can't catch it;
+# comparing which of these closed-class words appear can -- but Whisper
+# frequently transcribes contractions without the apostrophe ("im", "dont"),
+# and cleanup legitimately expanding "im" -> "i am" (a mechanics fix, not a
+# reword) must not look like a pronoun swap just because "im" isn't itself
+# in _CRITICAL_WORDS. _CONTRACTION_CRITICAL maps each contracted token to
+# the critical word(s) it implies, so both spellings normalize the same way.
+_CRITICAL_WORDS = frozenset([
+    "i", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "ours",
+    "they", "them", "their", "theirs", "he", "him", "his", "she", "her", "hers",
+    "it", "its", "not", "no", "never",
+])
+_CONTRACTION_CRITICAL = {
+    "im": "i", "ive": "i", "id": "i",
+    "youre": "you", "youve": "you", "youd": "you",
+    "hes": "he", "hed": "he",
+    "shes": "she", "shed": "she",
+    "theyre": "they", "theyve": "they", "theyd": "they",
+    "were": "we", "weve": "we", "wed": "we",
+    "dont": "not", "doesnt": "not", "didnt": "not",
+    "cant": "not", "cannot": "not", "wont": "not",
+    "isnt": "not", "arent": "not", "wasnt": "not", "werent": "not",
+    "hasnt": "not", "havent": "not", "hadnt": "not",
+    "couldnt": "not", "wouldnt": "not", "shouldnt": "not", "mustnt": "not",
+}
+
+
+def _critical_set(words) -> set:
+    result = set()
+    for w in words:
+        if w in _CRITICAL_WORDS:
+            result.add(w)
+        elif w in _CONTRACTION_CRITICAL:
+            result.add(_CONTRACTION_CRITICAL[w])
+    return result
+
+
 def _looks_like_runaway(raw: str, cleaned: str) -> bool:
     """Small local models occasionally ignore the system prompt and answer
     the transcript instead of editing it (or ramble on using dictionary
     terms the speaker never said). A real cleanup keeps most of the
     speaker's own words and doesn't balloon in length, so anything that
     drifts too far from the raw transcript is treated as a runaway
-    generation rather than a genuine edit."""
-    raw_words = set(_words(raw))
+    generation rather than a genuine edit. Also rejects a swapped/dropped
+    pronoun or negation even when overlap and length both look fine (see
+    _CRITICAL_WORDS above) -- those are meaning-altering, not stylistic."""
+    raw_words = _words(raw)
     cleaned_words = _words(cleaned)
-    if not raw_words or not cleaned_words:
+    raw_set = set(raw_words)
+    if not raw_set or not cleaned_words:
         return False
-    overlap = len(raw_words & set(cleaned_words)) / len(raw_words)
-    too_long = len(cleaned_words) > max(20, len(raw_words) * 2.5)
-    return overlap < 0.4 or too_long
+    cleaned_set = set(cleaned_words)
+    shared = len(raw_set & cleaned_set)
+    overlap = shared / len(raw_set)
+    reverse_overlap = shared / len(cleaned_set)
+    too_long = len(cleaned_words) > max(20, len(raw_set) * 2.5)
+    critical_mismatch = _critical_set(raw_words) != _critical_set(cleaned_words)
+    return overlap < 0.4 or reverse_overlap < 0.4 or too_long or critical_mismatch
 
 
 def clean_text(raw: str, dictionary: str) -> str:
@@ -402,15 +587,31 @@ def clean_text(raw: str, dictionary: str) -> str:
 
 def ollama_available() -> bool:
     try:
-        requests.get("http://localhost:11434/api/version", timeout=3)
+        requests.get("http://127.0.0.1:11434/api/version", timeout=3)
         return True
     except Exception:
         return False
 
 
+def wait_for_ollama(timeout: float = 45.0) -> bool:
+    """ollama_available(), but tolerant of Ollama still starting up.
+
+    On Windows both Wingvox and Ollama are launched by their own logon-
+    triggered scheduled task with no ordering guarantee; on Mac the launchd
+    service and the login item race the same way after a reboot. Polling for
+    a while turns "you happened to lose the race" into "it works"."""
+    deadline = time.time() + timeout
+    while True:
+        if ollama_available():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1.5)
+
+
 def ollama_model_pulled(model: str = OLLAMA_MODEL) -> bool:
     try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=3)
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=3)
         r.raise_for_status()
         entries = r.json().get("models", [])
         names = {m.get("name") for m in entries} | {m.get("model") for m in entries}
@@ -433,6 +634,23 @@ def warm_up_llm():
 
 _kb = keyboard.Controller()
 
+# Serializes the whole set-clipboard / paste / restore-clipboard sequence.
+# Two dictations finishing close together would otherwise interleave: the
+# second one's clipboard write can land between the first's paste and its
+# restore, so the first pastes the second's text (or the restore clobbers
+# text that hasn't been pasted yet).
+_inject_lock = threading.Lock()
+
+# How long to wait after sending the paste keystroke before putting the
+# user's previous clipboard contents back. This is a guess at "the focused
+# app has processed Ctrl+V by now" -- there's no completion signal to wait
+# on. Too short and a slow app (a loaded browser, Electron apps like Slack
+# or Teams, anything over RDP) processes the paste *after* the restore and
+# inserts the user's old clipboard instead of what they said, silently.
+# Overridable for anyone who still sees the wrong text pasted.
+PASTE_SETTLE_SECONDS = float(os.environ.get("WINGVOX_PASTE_SETTLE", "1.2"))
+
+
 def inject(text: str):
     if not text:
         return
@@ -440,23 +658,28 @@ def inject(text: str):
     # "…" character — some apps mis-decode its encoding on paste and show
     # garbage, so use plain ASCII dots, which can't be mis-encoded.
     text = text.replace("…", "...")
-    try:
-        prev_clipboard = pc.clipboard_get()
-    except Exception:
-        prev_clipboard = None
-    pc.clipboard_set(text)
-    time.sleep(0.05)
-    with _kb.pressed(pc.PASTE_MODIFIER):
-        _kb.press("v")
-        _kb.release("v")
-    if prev_clipboard is not None:
-        def _restore():
-            time.sleep(0.4)  # let the paste land before putting the old clipboard back
+    with _inject_lock:
+        try:
+            # None means the clipboard holds something that isn't text (an
+            # image, copied files) -- there is no text to put back, and
+            # writing one would destroy whatever is actually there.
+            prev_clipboard = pc.clipboard_get()
+        except Exception:
+            prev_clipboard = None
+        pc.clipboard_set(text)
+        time.sleep(0.15)
+        pc.release_all_modifiers(_kb)
+        with _kb.pressed(pc.PASTE_MODIFIER):
+            time.sleep(0.02)
+            _kb.press("v")
+            time.sleep(0.02)
+            _kb.release("v")
+        if prev_clipboard is not None:
+            time.sleep(PASTE_SETTLE_SECONDS)
             try:
                 pc.clipboard_set(prev_clipboard)
             except Exception:
                 pass
-        threading.Thread(target=_restore, daemon=True).start()
 
 
 # ---------- glue: push-to-talk loop ----------
@@ -515,6 +738,30 @@ def run():
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
     state = {"recording": False, "warm": False}
+    finish_lock = threading.Lock()
+
+    def _finish_recording(source):
+        with finish_lock:
+            if not state["recording"]:
+                return
+            state["recording"] = False
+        audio = recorder.stop()
+        print(f"  ○ {len(audio)/SAMPLE_RATE:.1f}s captured ({source})")
+        threading.Thread(target=process, args=(audio,), daemon=True).start()
+
+    def _release_watchdog():
+        # pynput's low-level hook has been observed to silently drop
+        # on_release for Right Alt/AltGr on some Windows setups (seen under
+        # UTM VM keyboard passthrough) -- the press fires, the release
+        # never does, leaving the overlay stuck on "Recording" forever.
+        # Poll the actual hardware key state as a backstop so a missed
+        # hook callback can never wedge a recording open indefinitely.
+        while state["recording"]:
+            time.sleep(0.15)
+            if state["recording"] and not pc.is_hotkey_physically_down():
+                print("  [key] watchdog: physical key up, on_release never fired -- finishing recording")
+                _finish_recording("watchdog")
+                return
 
     def warm_up():
         status("Loading speech model…", "gray")
@@ -523,7 +770,13 @@ def run():
         except Exception as e:
             status(f"⚠ Speech model failed to load: {e}", "orange")
             return
-        if not ollama_available():
+        # Wingvox and Ollama are both started by a logon trigger with no
+        # ordering between them, so Ollama is routinely still coming up when
+        # this runs. A single check here would show "Ollama not running" for
+        # a perfectly healthy install and, worse, skip the LLM warm-up --
+        # leaving the user's first real cleanup to pay the cold-start cost
+        # (measured at ~14s vs ~3s warm). Wait for it before giving up.
+        if not wait_for_ollama():
             state["warm"] = True
             ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
             status(f"⚠ Ollama not running — will paste raw transcripts "
@@ -558,7 +811,21 @@ def run():
             status(f"✓ {cleaned[:60]}", "green", hide_after=2)
         except Exception:
             t2 = time.time()
-            inject(raw)
+            try:
+                inject(raw)
+            except Exception as inject_err:
+                # If this second, fallback inject() also fails, don't let it
+                # propagate uncaught -- process() runs on its own daemon
+                # thread with nothing else watching it, so an uncaught
+                # exception here would silently kill the thread: no more
+                # status() calls, the overlay stuck on "Cleaning up…"
+                # forever, and the user's words gone with no explanation.
+                # Show them the raw text directly since paste isn't working.
+                status(f"⚠ Paste failed ({inject_err}) — heard: {raw[:80]}",
+                       "orange", hide_after=10)
+                print(f"  raw:   {raw}")
+                print(f"  ⚠ fallback inject(raw) also failed: {inject_err!r}")
+                return
             if ollama_available() and not ollama_model_pulled():
                 status(f"⚠ Ollama model not pulled — run `ollama pull {OLLAMA_MODEL}` "
                        "— pasted raw transcript", "orange", hide_after=8)
@@ -580,42 +847,89 @@ def run():
             if overlay:
                 overlay.show_recording()
             recorder.start()
-        else:
-            # A second press while already "recording" means the matching
-            # release was never delivered (a rare quirk with modifier-only
-            # global hotkeys, especially after a long hold) — treat it as a
-            # manual cancel instead of silently ignoring it, so a missed
-            # release can never lock the app up for good. Whatever was
-            # captured is discarded, not transcribed.
-            state["recording"] = False
-            recorder.stop()
-            status(f"✕ Canceled — press {HOTKEY_LABEL} to try again", "orange", hide_after=2)
+            if pc.IS_WINDOWS:
+                threading.Thread(target=_release_watchdog, daemon=True).start()
+        # else: a repeat on_press while already recording. Windows
+        # auto-repeats a held key at the OS level (confirmed: ~10/sec), so
+        # this fires constantly for the entire duration of a normal hold --
+        # it is not evidence of a missed release. Ignore it; _release_watchdog
+        # (Windows) / a genuine on_release (Mac) is what actually ends the
+        # recording.
+        # NOTE: this used to `return False` here to suppress the OS's Alt
+        # ribbon-hint overlay. That was wrong -- pynput treats a callback
+        # returning False as "stop listening entirely" (raises
+        # StopException), not "suppress this one event". It silently killed
+        # the whole global hotkey after the very first press on every
+        # Windows run. Real selective suppression is wired up below via
+        # win32_event_filter/suppress_event on the Listener itself.
 
     def on_release(key):
-        if key in pc.HOTKEY_KEYS and state["recording"]:
-            state["recording"] = False
-            audio = recorder.stop()
-            print(f"○ {len(audio)/SAMPLE_RATE:.1f}s captured")
-            threading.Thread(target=process, args=(audio,), daemon=True).start()
+        if key not in pc.HOTKEY_KEYS:
+            return
+        _finish_recording("on_release")
 
     def _guarded(name, fn):
-        # pynput silently kills the whole global listener if a callback
-        # raises (e.g. the mic stream fails to start) — one bad press would
-        # otherwise wedge the hotkey dead until a manual relaunch.
+        # A raised exception here would otherwise propagate up through
+        # pynput's callback wrapper and kill the whole global listener (one
+        # bad press wedging the hotkey dead until a manual relaunch) --
+        # catch and report instead. Must not return False: pynput treats
+        # that as a request to stop the listener entirely, same hazard.
         def wrapper(key):
             try:
                 fn(key)
             except Exception as e:
-                state["recording"] = False
+                if state["recording"]:
+                    # e.g. on_press raised something after recorder.start()
+                    # already succeeded -- setting state["recording"] = False
+                    # directly (without stopping the recorder) would leak
+                    # the open stream: its callback keeps writing into
+                    # whatever self._frames is on every future recording
+                    # (it's read fresh each call, not a captured snapshot),
+                    # silently corrupting audio, and the orphaned stream is
+                    # never closed for the rest of the process's life.
+                    state["recording"] = False
+                    try:
+                        recorder.stop()
+                    except Exception:
+                        pass
                 status(f"⚠ {name} error: {e}", "orange", hide_after=6)
         return wrapper
 
+    # NOTE: previously tried suppressing the Alt ribbon-hint overlay here via
+    # win32_event_filter + listener.suppress_event(). Turns out
+    # suppress_event() works by *raising an exception*
+    # (SystemHook.SuppressException) that unwinds pynput's event processing
+    # for that message right there -- it doesn't just block OS-level
+    # propagation, it also aborts before on_press/on_release are ever
+    # called. That made suppressing the Alt key indistinguishable from the
+    # hotkey not working at all. The ribbon-hint flicker is cosmetic;
+    # dropped rather than risk breaking the hotkey again. If it's worth
+    # fixing later, it needs the recording start/stop logic run from
+    # *inside* the filter itself (before raising suppress_event), not a
+    # separate on_press/on_release pair.
     threading.Thread(target=warm_up, daemon=True).start()
     listener = keyboard.Listener(
         on_press=_guarded("on_press", on_press),
         on_release=_guarded("on_release", on_release),
     )
     listener.start()
+
+    def _watch_listener():
+        # The comment above on _guarded already covers our own callbacks
+        # raising -- this catches the other case: pynput's *own* internal
+        # dispatch/suppression code throwing and silently killing the
+        # listener thread. Nothing else observes that thread's lifetime
+        # (run_event_loop() below blocks on the Tk mainloop, not
+        # listener.join()), so without this a dead hook is invisible --
+        # the app looks alive but no key event ever arrives again.
+        try:
+            listener.join()
+        except Exception as e:
+            print(f"  ⚠ hotkey listener died: {e!r} — restart Wingvox to recover")
+        else:
+            print("  ⚠ hotkey listener stopped unexpectedly — restart Wingvox to recover")
+
+    threading.Thread(target=_watch_listener, daemon=True).start()
     print(f"Hold {HOTKEY_LABEL.upper()} to dictate into any app. Ctrl+C here to quit.")
     if pc.IS_MAC:
         print("If nothing happens: System Settings > Privacy & Security >")

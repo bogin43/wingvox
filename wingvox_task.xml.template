@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-16"?>
 <!-- Wingvox Task Scheduler definition: the Windows analogue of
      com.broganwilliams.wingvox.plist.template. Registered by install.ps1 via:
        schtasks /create /tn Wingvox /xml wingvox_task.xml /f

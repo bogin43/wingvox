@@ -45,6 +45,10 @@ try {
 if (-not $pythonOk) {
     Write-Host "    Not found -- installing Python 3.12 (x64) via winget."
     winget install --id Python.Python.3.12 -e --architecture x64 --source winget --accept-package-agreements --accept-source-agreements
+    # winget updates the registry's PATH but this running session's $env:Path
+    # was captured at shell start, so the py launcher won't resolve without
+    # pulling the fresh value back in.
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
     $pythonOk = $false
     try {
         $v = & py -3.12-64 -c "print('ok')" 2>$null
@@ -68,17 +72,35 @@ if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
     # winget installs to a per-user path not yet on PATH in this session.
     $env:Path = "$env:LOCALAPPDATA\Programs\Ollama;$env:Path"
 }
+# Resolve the full exe path rather than relying on bare "ollama" -- PATH
+# resolution has proven unreliable right after a fresh winget install in
+# the same session.
+$ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+if (-not $ollamaExe) { $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" }
+
+# Unlike the Mac install (`brew services start ollama`, a genuinely
+# persistent launchd service), winget's Ollama package registers no
+# auto-start of its own -- a one-off `ollama serve` here would die with
+# this session and never come back after a reboot, leaving Wingvox (which
+# does auto-start via its own Task Scheduler entry below) permanently stuck
+# on "Ollama not running" until the user manually restarts it. Give it the
+# same logon-triggered persistence Wingvox itself gets, further down.
+schtasks /create /tn "Wingvox-Ollama" /tr "`"$ollamaExe`" serve" /sc onlogon /rl limited /f | Out-Null
+
 try {
-    Invoke-RestMethod -Uri "http://localhost:11434/api/version" -TimeoutSec 2 | Out-Null
+    Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
 } catch {
     Write-Host "    Starting Ollama..."
-    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
+    # -WindowStyle Hidden with no redirected std handles can silently fail to
+    # spawn in a non-interactive session (no window station to attach to) --
+    # redirecting to files sidesteps that.
+    Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\wingvox_ollama_stdout.log" -RedirectStandardError "$env:TEMP\wingvox_ollama_stderr.log"
 }
 Write-Host -NoNewline "    Waiting for Ollama to come up"
 $ollamaReady = $false
 for ($i = 1; $i -le 20; $i++) {
     try {
-        Invoke-RestMethod -Uri "http://localhost:11434/api/version" -TimeoutSec 2 | Out-Null
+        Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
         Write-Host " -- ready."
         $ollamaReady = $true
         break
@@ -111,6 +133,29 @@ Step "Installing Python dependencies"
 & $VenvPy -m pip install --upgrade pip -q
 & $VenvPy -m pip install -r requirements.txt -q
 
+# ---------- 5b. Pre-download the Whisper model ----------
+# faster-whisper fetches its weights lazily on first use. Left alone, that
+# download (~1GB for small.en) happens on the very first launch instead --
+# after this script has already said "install complete" -- so Wingvox sits
+# on "Loading speech model..." for minutes with no progress shown anywhere,
+# which reads as a broken install. Pull it here, where the wait is expected
+# and the user can see it happening.
+Step "Downloading the speech model (about 1GB -- one time)"
+$env:WINGVOX_WHISPER_MODEL = $null
+& $VenvPy -c @"
+import os, sys
+from faster_whisper import WhisperModel
+model = os.environ.get('WINGVOX_WHISPER_MODEL') or 'small.en'
+print('    Fetching ' + model + ' ...')
+WhisperModel(model, device='auto', compute_type='auto')
+print('    Speech model ready.')
+"@
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "    WARNING: couldn't pre-download the speech model."
+    Write-Host "    Not fatal -- Wingvox will download it on first launch instead,"
+    Write-Host "    but the first dictation will be slow. Check your connection."
+}
+
 # ---------- 6. Default glossary ----------
 Step "Setting up dictionary.txt"
 $DataDir = Join-Path $env:LOCALAPPDATA "Wingvox"
@@ -140,12 +185,18 @@ Write-Host "    Built $ExePath"
 Step "Installing the background task"
 $TaskXmlTemplate = Join-Path $RepoDir "wingvox_task.xml.template"
 $TaskXmlPath = Join-Path $RepoDir "wingvox_task.xml"
-(Get-Content $TaskXmlTemplate -Raw) `
+$TaskXmlContent = (Get-Content $TaskXmlTemplate -Raw) `
     -replace "__EXE_PATH__", $ExePath `
-    -replace "__REPO_DIR__", $RepoDir `
-    | Out-File -FilePath $TaskXmlPath -Encoding Unicode
+    -replace "__REPO_DIR__", $RepoDir
+# schtasks' XML importer wants UTF-16 specifically -- both UTF-8 with a BOM
+# ("incorrect document syntax") and UTF-8 without one ("unable to switch the
+# encoding") were rejected. Match the template's declared encoding exactly.
+[System.IO.File]::WriteAllText($TaskXmlPath, $TaskXmlContent, [System.Text.Encoding]::Unicode)
 
-schtasks /delete /tn Wingvox /f 2>$null | Out-Null
+# /delete legitimately "fails" (no existing task) on a first-ever install --
+# $ErrorActionPreference = "Stop" turns that expected stderr output into a
+# terminating error unless it's caught explicitly.
+try { schtasks /delete /tn Wingvox /f 2>$null | Out-Null } catch {}
 schtasks /create /tn Wingvox /xml $TaskXmlPath /f | Out-Null
 schtasks /run /tn Wingvox | Out-Null
 Write-Host "    Wingvox will now start automatically every time you log in."
@@ -164,4 +215,6 @@ Write-Host "  $ExePath"
 Write-Host "(or 'Wingvox') is allowed."
 Write-Host ""
 Write-Host "Opening the setup guide now..."
-Start-Process (Join-Path $RepoDir "SETUP.md")
+try { Start-Process (Join-Path $RepoDir "SETUP.md") } catch {
+    Write-Host "    (Couldn't auto-open it -- read it directly at $(Join-Path $RepoDir 'SETUP.md') instead.)"
+}

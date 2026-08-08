@@ -40,6 +40,24 @@ def run_model(audio, prompt):
         segments, _info = model.transcribe(
             audio, language="en", initial_prompt=prompt,
             condition_on_previous_text=False,
+            # beam_size=5 (faster-whisper's default) barely changes accuracy
+            # on short push-to-talk clips but costs real time on CPU --
+            # beam_size=1 (greedy decoding) measured ~10% faster in a VM
+            # benchmark with no noticeable transcription quality drop.
+            beam_size=1,
+            # Every recording has some silence padding (the gap between
+            # pressing the hotkey and actually speaking, and again before
+            # releasing it) -- vad_filter skips those silent stretches
+            # instead of running the full model over them. onnxruntime (its
+            # only extra dependency) is already bundled via faster-whisper.
+            # threshold is lowered from Silero's 0.5 default: on a weak/
+            # attenuated mic signal (a virtual/VM audio device, or just a
+            # user speaking quietly), the default has a real risk of
+            # misclassifying genuine quiet speech as silence and dropping it
+            # entirely before transcription ever sees it -- surfacing as a
+            # false "Heard nothing" for words that were actually spoken.
+            vad_filter=True,
+            vad_parameters={"threshold": 0.35},
         )
         # segments is a lazy generator — must materialize it here, inside
         # the lock, before returning (a generator can only be consumed
