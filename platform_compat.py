@@ -203,6 +203,62 @@ def setup_windows_console_log(log_path: Path, max_bytes: int = 5_000_000) -> Non
     sys.stderr = log
 
 
+# ---------- Windows: start Ollama without a console window ----------
+
+def find_ollama() -> str:
+    """Full path to ollama.exe, or "" if it isn't installed."""
+    if not IS_WINDOWS:
+        return ""
+    import shutil
+    found = shutil.which("ollama")
+    if found:
+        return found
+    for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", "")):
+        if base:
+            candidate = Path(base) / "Programs" / "Ollama" / "ollama.exe"
+            if candidate.exists():
+                return str(candidate)
+    return ""
+
+
+def start_ollama_background() -> bool:
+    """Launch `ollama serve` with no console window, detached so it outlives
+    Wingvox. Returns whether a launch was attempted.
+
+    On the Mac, `brew services start ollama` gives Ollama real background
+    persistence and nothing here is needed. Windows has no equivalent:
+    ollama.exe is a CONSOLE-subsystem binary, so any logon-time launch of it
+    puts a terminal window on the user's screen. That window looks like
+    leftover clutter, and closing it -- the obvious thing to do -- kills
+    Ollama, after which Wingvox silently falls back to pasting raw,
+    uncleaned transcripts with nothing on screen explaining why.
+
+    CREATE_NO_WINDOW suppresses the console entirely; DETACHED_PROCESS keeps
+    the server alive independently of Wingvox. Ollama's own `ollama app.exe`
+    (GUI-subsystem, tray icon) would be the tidier answer, but it exits
+    immediately with status 1 when Task Scheduler starts it, so driving
+    ollama.exe directly is the reliable path."""
+    if not IS_WINDOWS:
+        return False
+    exe = find_ollama()
+    if not exe:
+        return False
+    CREATE_NO_WINDOW = 0x08000000
+    DETACHED_PROCESS = 0x00000008
+    try:
+        subprocess.Popen(
+            [exe, "serve"],
+            creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
 # ---------- Windows: deep-link into the privacy settings page ----------
 
 def open_privacy_settings(page: str = "microphone") -> None:

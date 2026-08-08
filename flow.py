@@ -777,12 +777,18 @@ def run():
         except Exception as e:
             status(f"⚠ Speech model failed to load: {e}", "orange")
             return
-        # Wingvox and Ollama are both started by a logon trigger with no
-        # ordering between them, so Ollama is routinely still coming up when
-        # this runs. A single check here would show "Ollama not running" for
-        # a perfectly healthy install and, worse, skip the LLM warm-up --
-        # leaving the user's first real cleanup to pay the cold-start cost
-        # (measured at ~14s vs ~3s warm). Wait for it before giving up.
+        # Start Ollama ourselves if it isn't up. On Windows nothing else
+        # reliably does: it has no background service, and launching it from
+        # Task Scheduler at logon puts a console window on screen that kills
+        # Ollama when closed. Starting it here (windowless, detached) keeps
+        # cleanup working without the user having to know Ollama exists.
+        if not ollama_available() and pc.start_ollama_background():
+            status("Starting Ollama…", "gray")
+        # Even once started, Ollama takes a moment to bind its port -- and on
+        # Mac it races Wingvox at login. A single check here would report
+        # "Ollama not running" for a perfectly healthy install and, worse,
+        # skip the LLM warm-up, leaving the first real cleanup to pay the
+        # cold-start cost (measured at ~14s vs ~3s warm).
         if not wait_for_ollama():
             state["warm"] = True
             ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"

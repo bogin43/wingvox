@@ -78,22 +78,24 @@ if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
 $ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue).Source
 if (-not $ollamaExe) { $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" }
 
-# Unlike the Mac install (`brew services start ollama`, a genuinely
-# persistent launchd service), winget's Ollama package registers no
-# auto-start of its own -- a one-off `ollama serve` here would die with
-# this session and never come back after a reboot, leaving Wingvox (which
-# does auto-start via its own Task Scheduler entry below) permanently stuck
-# on "Ollama not running" until the user manually restarts it. Give it the
-# same logon-triggered persistence Wingvox itself gets, further down.
-schtasks /create /tn "Wingvox-Ollama" /tr "`"$ollamaExe`" serve" /sc onlogon /rl limited /f | Out-Null
+# Earlier versions registered a "Wingvox-Ollama" logon task running
+# `ollama.exe serve`. ollama.exe is a CONSOLE-subsystem binary, so that put a
+# terminal window on screen at every logon -- and closing it, the obvious
+# thing to do with a stray terminal, killed Ollama and silently downgraded
+# Wingvox to pasting raw uncleaned transcripts. Wingvox now starts Ollama
+# itself, windowless and detached (see start_ollama_background in
+# platform_compat.py), so remove the old task on upgrade. The /delete
+# legitimately "fails" when there's nothing to remove.
+try { schtasks /delete /tn "Wingvox-Ollama" /f 2>$null | Out-Null } catch {}
 
 try {
     Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
 } catch {
     Write-Host "    Starting Ollama..."
-    # -WindowStyle Hidden with no redirected std handles can silently fail to
-    # spawn in a non-interactive session (no window station to attach to) --
-    # redirecting to files sidesteps that.
+    # Only needed so `ollama pull` below has a server to talk to -- this one
+    # is transient and hidden. -WindowStyle Hidden with no redirected std
+    # handles can silently fail to spawn in a non-interactive session (no
+    # window station to attach to), so redirect to files.
     Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\wingvox_ollama_stdout.log" -RedirectStandardError "$env:TEMP\wingvox_ollama_stderr.log"
 }
 Write-Host -NoNewline "    Waiting for Ollama to come up"
