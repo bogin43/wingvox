@@ -64,13 +64,20 @@ cd $env:USERPROFILE\wingvox
 .\install.ps1
 ```
 
-Installs Ollama/Python as needed, builds `Wingvox.exe`, and registers a Task
-Scheduler entry so it starts automatically at login. The Whisper model
-(`small.en` by default — see `SETUP.md` for other sizes) and the cleanup model
-download on first run.
+Installs Ollama/Python as needed, downloads both models, builds `Wingvox.exe`,
+and registers a Task Scheduler entry so it starts automatically at login.
+Takes a few minutes, longer on a slow connection: the Whisper model
+(`small.en` by default — see `SETUP.md` for other sizes) is ~1GB and the
+cleanup model another ~2GB. Budget **~3.5GB of disk** for everything
+(models, the Python environment, and the built app).
 
 Don't move the `%USERPROFILE%\wingvox` folder after installing — the background
 task references this exact location.
+
+To update later, re-run the same one-liner: it pulls the latest code and
+re-installs over the top, keeping your glossary and corrections.
+
+To remove it, run `.\uninstall.ps1` from the Wingvox folder.
 
 ## Run it
 

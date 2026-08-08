@@ -16,6 +16,24 @@ function Step($msg) {
     Write-Host "==> $msg"
 }
 
+function Remove-Stubbornly($path) {
+    # Windows releases a killed process's file handles asynchronously, so a
+    # delete issued immediately after taskkill can fail on the very exe that
+    # was just running. Silently swallowing that (and still printing
+    # "Removed") left the built app on disk while claiming otherwise -- so
+    # retry for a few seconds, then report what actually happened.
+    if (-not (Test-Path $path)) { return $true }
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            Remove-Item -Recurse -Force $path -ErrorAction Stop
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    return -not (Test-Path $path)
+}
+
 Write-Host "This will remove Wingvox's background tasks and its built app."
 Write-Host "Your Python install, Ollama, and the downloaded AI models are left alone."
 Write-Host ""
@@ -33,6 +51,12 @@ Step "Stopping Wingvox"
 # uninstall partway through, so swallow them individually.
 try { schtasks /end /tn Wingvox 2>$null | Out-Null } catch {}
 try { taskkill /im Wingvox.exe /f 2>$null | Out-Null } catch {}
+# Wait for it to actually be gone, not just signalled -- the file deletions
+# below race the OS releasing its handles otherwise.
+for ($i = 0; $i -lt 20; $i++) {
+    if (-not (Get-Process Wingvox -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 250
+}
 Write-Host "    Stopped."
 
 # ---------- 2. Scheduled tasks ----------
@@ -47,10 +71,18 @@ Write-Host "    Removed 'Wingvox-Ollama' (the auto-start entry, not Ollama itsel
 
 # ---------- 3. Built app ----------
 Step "Removing the built app"
-Remove-Item -Recurse -Force (Join-Path $RepoDir "dist") -ErrorAction SilentlyContinue
-Remove-Item -Recurse -Force (Join-Path $RepoDir "build") -ErrorAction SilentlyContinue
-Remove-Item -Force (Join-Path $RepoDir "wingvox_task.xml") -ErrorAction SilentlyContinue
-Write-Host "    Removed dist\, build\, and the generated task XML."
+$leftovers = @()
+foreach ($item in @("dist", "build", "wingvox_task.xml")) {
+    $path = Join-Path $RepoDir $item
+    if (-not (Remove-Stubbornly $path)) { $leftovers += $path }
+}
+if ($leftovers.Count -eq 0) {
+    Write-Host "    Removed dist\, build\, and the generated task XML."
+} else {
+    Write-Host "    Removed what it could, but these are still in use:"
+    $leftovers | ForEach-Object { Write-Host "      $_" }
+    Write-Host "    Something still has them open. Reboot and delete them by hand."
+}
 
 # ---------- 4. User data (opt-in) ----------
 Step "Personal settings"

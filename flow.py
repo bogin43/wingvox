@@ -60,6 +60,11 @@ if pc.IS_MAC:
 else:
     import stt_windows as stt
 
+# Printed to the log at every startup. When someone reports a problem, the
+# first question is which build they're on -- without this the only answer
+# is "whenever I last ran the installer".
+WINGVOX_VERSION = "0.1.0"
+
 SAMPLE_RATE = 16000
 
 # Longest single dictation to keep, in samples. Past this the recorder stops
@@ -706,6 +711,8 @@ def run():
         sys.exit(0)
     if pc.IS_WINDOWS:
         pc.setup_windows_console_log(LOG_PATH)
+    # First line of every run, so a log someone sends in identifies its build.
+    print(f"  Wingvox {WINGVOX_VERSION} starting ({platform.system()})")
     dictionary = load_dictionary()
     corrections = load_corrections()
     print("  Requesting microphone access…")
