@@ -93,6 +93,12 @@ schtasks /end /tn Wingvox
 schtasks /run /tn Wingvox
 ```
 
+**Turning it off for a while.** If Wingvox is competing for the hotkey or the
+mic with something else — a VM, a game, screen-sharing software, another
+dictation tool — double-click **`wingvox-off.cmd`** in the Wingvox folder. It
+stays off (including across reboots) until you double-click
+**`wingvox-on.cmd`**. Neither one uninstalls anything.
+
 ### Both platforms
 
 A status pill near your cursor shows what it's doing: loading models on

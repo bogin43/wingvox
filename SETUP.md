@@ -125,6 +125,19 @@ Wingvox detects the hotkey) as suspicious. If pressing the hotkey does
 nothing at all — no pill, no sound — check your AV's activity/quarantine log
 and allow Wingvox if it's listed there.
 
+### Turning Wingvox off and back on
+
+You don't need to uninstall it just to get it out of the way for a while.
+In the Wingvox folder there are two scripts you can double-click:
+
+| Script | What it does |
+|---|---|
+| `wingvox-off.cmd` | Stops Wingvox and keeps it from starting again, even after a reboot |
+| `wingvox-on.cmd` | Turns it back on and starts it immediately |
+
+Useful when something else needs the same hotkey or the microphone — a virtual
+machine, a game, screen-sharing software, or another dictation tool.
+
 ### How to verify it worked (Windows)
 
 Hold **Right Alt**, say a sentence, release. You should see a small pill near
