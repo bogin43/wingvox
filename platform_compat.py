@@ -34,25 +34,17 @@ PASTE_MODIFIER = keyboard.Key.cmd if IS_MAC else keyboard.Key.ctrl
 # layout/driver — check membership against this tuple, not equality against
 # a single Key, so international users aren't silently locked out.
 #
-# Left Alt is deliberately NOT a hotkey by default. Some virtualized keyboard
-# paths (UTM's, notably) deliver a physical right-side Alt as VK_LMENU, which
-# makes Left Alt tempting to accept -- but on ordinary hardware Left Alt is
-# the prefix for Alt+Tab, Alt+F4, Alt+Space, Alt+<letter> menus and more, so
-# accepting it means every one of those shortcuts opens the mic and starts a
-# recording. Set WINGVOX_ALLOW_LEFT_ALT=1 to opt in anyway (useful when
-# testing inside a VM whose keyboard passthrough rewrites the key).
-ALLOW_LEFT_ALT = os.environ.get("WINGVOX_ALLOW_LEFT_ALT") == "1"
-
-if IS_MAC:
-    HOTKEY_KEYS = (keyboard.Key.alt_r,)
-else:
-    HOTKEY_KEYS = (keyboard.Key.alt_r, keyboard.Key.alt_gr)
-    if ALLOW_LEFT_ALT:
-        HOTKEY_KEYS += (keyboard.Key.alt_l,)
+# Left Alt is deliberately absent. Some virtualized keyboard paths (UTM's,
+# notably) deliver a physical right-side Alt as VK_LMENU, which makes Left
+# Alt tempting to accept -- but on ordinary hardware Left Alt prefixes
+# Alt+Tab, Alt+F4, Alt+Space and every Alt+<letter> menu, so accepting it
+# means all of those open the mic and start a recording.
+HOTKEY_KEYS = (keyboard.Key.alt_r,) if IS_MAC else (
+    keyboard.Key.alt_r, keyboard.Key.alt_gr,
+)
 
 if IS_WINDOWS:
     import ctypes
-    VK_LMENU = 0xA4
     VK_RMENU = 0xA5
 
     def is_hotkey_physically_down() -> bool:
@@ -63,13 +55,10 @@ if IS_WINDOWS:
         recording stuck open forever. GetAsyncKeyState reads the actual
         current hardware key state directly from Windows, independent of
         whatever the hook chose to deliver, so callers can poll it as a
-        fallback for a release the hook missed. Checks exactly the same keys
-        HOTKEY_KEYS accepts -- polling Left Alt when it isn't a hotkey would
-        keep a recording alive for an unrelated Alt+Tab."""
-        user32 = ctypes.windll.user32
-        if user32.GetAsyncKeyState(VK_RMENU) & 0x8000:
-            return True
-        return bool(ALLOW_LEFT_ALT and (user32.GetAsyncKeyState(VK_LMENU) & 0x8000))
+        fallback for a release the hook missed. Checks exactly the key
+        HOTKEY_KEYS accepts -- polling Left Alt too would keep a recording
+        alive for an unrelated Alt+Tab."""
+        return bool(ctypes.windll.user32.GetAsyncKeyState(VK_RMENU) & 0x8000)
 else:
     def is_hotkey_physically_down() -> bool:
         return False
