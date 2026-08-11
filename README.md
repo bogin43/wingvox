@@ -132,14 +132,15 @@ Handled automatically by the installer:
 ## macOS permissions
 
 System Settings > Privacy & Security: grant **Microphone**, **Accessibility**, and
-**Input Monitoring** to the actual Python.app binary the venv runs
-(`venv/bin/python` resolves to something like
-`/opt/homebrew/Cellar/python@3.12/<version>/Frameworks/Python.framework/Versions/3.12/Resources/Python.app` —
-check with `./venv/bin/python -c "import sys; print(sys.executable)"`).
-If dictation silently does nothing, or the hotkey works but paste doesn't land, this is why.
-If Homebrew has multiple Python versions installed, there may be more than one "Python" entry
-in these lists with the same generic name/icon — make sure the one that's toggled on actually
-points at this exact path (remove and re-add via `+` > Cmd+Shift+G if unsure).
+**Input Monitoring** to **Wingvox**. If dictation silently does nothing, or the
+hotkey works but paste doesn't land, this is why. If it isn't listed, add it with
+`+` > Cmd+Shift+G > `~/wingvox/Wingvox.app`.
+
+macOS attributes these to the `Wingvox.app` bundle the LaunchAgent runs, not to
+the Python interpreter inside it — so there's nothing to re-grant when Homebrew
+bumps its Python version. (Earlier versions of this guide said to grant a
+"Python" entry instead. That was left over from before the app bundle existed;
+following it now grants permission to something that isn't what runs.)
 
 ## Windows permissions & known limitations
 

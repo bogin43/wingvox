@@ -17,9 +17,7 @@ Jump to: [Mac](#mac-setup) · [Windows](#windows-setup)
 Wingvox needs to hear you.
 
 1. Open **System Settings > Privacy & Security > Microphone**
-2. Find the entry matching the exact path `install.sh` printed at the end
-   (it'll look like a generic "Python" entry — match the exact path, not
-   just the name, especially if there's more than one)
+2. Find **Wingvox** in the list
 3. Make sure its toggle is **on**
 
 Skip this and every dictation will say "Heard nothing" even when you're
@@ -31,9 +29,7 @@ Wingvox needs this to detect your hotkey press and paste text into whatever
 app you're using.
 
 1. Open **System Settings > Privacy & Security > Accessibility**
-2. Find the same Python entry, toggle it **on**
-   (if it's not listed, click **+**, press **Cmd+Shift+G**, and paste the
-   path from `install.sh`'s output)
+2. Find **Wingvox**, toggle it **on**
 
 Skip this and you'll see "Accessibility access not granted — hotkey & paste
 won't work" the first time Wingvox starts.
@@ -44,10 +40,14 @@ A separate permission (as of recent macOS versions) also required for the
 global hotkey to work at all.
 
 1. Open **System Settings > Privacy & Security > Input Monitoring**
-2. Same as above — find or add the entry, toggle it **on**
+2. Same as above — find **Wingvox**, toggle it **on**
 
 Skip this and pressing the hotkey will do nothing at all — no error, no
 overlay, just silence.
+
+**If Wingvox isn't listed** in one of them, click **+**, press
+**Cmd+Shift+G**, and paste `~/wingvox/Wingvox.app` (the exact path is
+printed at the end of the installer).
 
 ### After granting permissions
 

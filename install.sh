@@ -151,15 +151,17 @@ echo "    Wingvox will now start automatically every time you log in."
 
 # ---------- Done ----------
 step "Install complete"
-RESOLVED_PY="$("$VENV_PY" -c 'import sys; print(sys.executable)')"
 echo
 echo "One more thing — macOS needs your permission for Wingvox to work."
 echo "This can't be done from a script; it needs a few clicks in System Settings."
 echo
-echo "The exact program that needs permission is:"
-echo "  $RESOLVED_PY"
-echo "(System Settings shows it as a generic \"Python\" entry — if you have"
-echo "more than one, match this exact path.)"
+echo "Look for \"Wingvox\" in each of these lists:"
+echo "  System Settings > Privacy & Security > Microphone"
+echo "  System Settings > Privacy & Security > Accessibility"
+echo "  System Settings > Privacy & Security > Input Monitoring"
+echo
+echo "If it isn't listed, click +, press Cmd+Shift+G, and paste:"
+echo "  $REPO_DIR/Wingvox.app"
 echo
 echo "Opening the setup guide now..."
 # Render SETUP.md to HTML first -- opening the .md directly hands a raw
