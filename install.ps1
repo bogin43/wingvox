@@ -217,6 +217,12 @@ Write-Host "  $ExePath"
 Write-Host "(or 'Wingvox') is allowed."
 Write-Host ""
 Write-Host "Opening the setup guide now..."
-try { Start-Process (Join-Path $RepoDir "SETUP.md") } catch {
-    Write-Host "    (Couldn't auto-open it -- read it directly at $(Join-Path $RepoDir 'SETUP.md') instead.)"
+# Render SETUP.md to HTML first -- opening the .md directly hands a raw
+# markdown file to Notepad, which is a wall of pipes and asterisks at
+# exactly the moment the user needs clear instructions.
+$SetupHtml = Join-Path $RepoDir "setup.html"
+& $VenvPy (Join-Path $RepoDir "make_setup_html.py") 2>$null | Out-Null
+$guide = if (Test-Path $SetupHtml) { $SetupHtml } else { Join-Path $RepoDir "SETUP.md" }
+try { Start-Process $guide } catch {
+    Write-Host "    (Couldn't auto-open it -- read it directly at $guide instead.)"
 }

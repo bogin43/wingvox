@@ -29,12 +29,29 @@ echo "    OK — Apple Silicon detected."
 # ---------- 2. Xcode Command Line Tools ----------
 step "Checking for Xcode Command Line Tools"
 if ! xcode-select -p &>/dev/null; then
-    echo "    Not found — triggering the install dialog."
-    xcode-select --install
+    echo "    Not found — opening Apple's installer dialog."
+    xcode-select --install 2>/dev/null || true
     echo
-    echo "Finish the Command Line Tools install in the dialog that just"
-    echo "opened, then re-run this script (./install.sh)."
-    exit 0
+    echo "    A macOS dialog just opened. Click Install and accept the"
+    echo "    licence; this script waits and carries on by itself."
+    echo -n "    Waiting"
+    # Previously this exited here and told the user to "re-run this script
+    # (./install.sh)" -- but the one-line installer runs from the user's
+    # home directory, where ./install.sh doesn't exist, so that instruction
+    # just failed. Wait the dialog out instead; there's nothing the user
+    # needs to do afterwards.
+    for _ in $(seq 1 360); do   # up to ~60 min; the download is large
+        xcode-select -p &>/dev/null && break
+        echo -n "."
+        sleep 10
+    done
+    echo
+    if ! xcode-select -p &>/dev/null; then
+        echo "Command Line Tools still aren't installed." >&2
+        echo "Finish the dialog, then run this to pick up where it left off:" >&2
+        echo "  $REPO_DIR/install.sh" >&2
+        exit 1
+    fi
 fi
 echo "    OK — already installed."
 
@@ -145,4 +162,11 @@ echo "(System Settings shows it as a generic \"Python\" entry — if you have"
 echo "more than one, match this exact path.)"
 echo
 echo "Opening the setup guide now..."
-open "$REPO_DIR/SETUP.md" 2>/dev/null || true
+# Render SETUP.md to HTML first -- opening the .md directly hands a raw
+# markdown file to TextEdit, which is a wall of pipes and asterisks at
+# exactly the moment the user needs clear instructions.
+if "$VENV_PY" "$REPO_DIR/make_setup_html.py" >/dev/null 2>&1; then
+    open "$REPO_DIR/setup.html" 2>/dev/null || true
+else
+    open "$REPO_DIR/SETUP.md" 2>/dev/null || true
+fi
