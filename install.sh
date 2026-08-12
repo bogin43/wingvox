@@ -112,6 +112,20 @@ step "Installing Python dependencies"
 echo "    Removing unused transitive dependencies (torch/numba/scipy/llvmlite)…"
 "$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite -q 2>/dev/null || true
 
+# ---------- 7b. Pre-download the Whisper model ----------
+# mlx-whisper fetches its weights lazily on first use, so without this the
+# ~1.5GB download happens on the first launch instead -- after the install
+# has already reported success. Wingvox then sits on "Loading speech model…"
+# for minutes with no progress shown anywhere, and any dictation attempted
+# meanwhile blocks behind it. Reads as a broken install. Pull it here, where
+# the wait is expected.
+step "Downloading the speech model (about 1.5GB, one time)"
+if ! "$VENV_PY" -c "import stt_mac; from huggingface_hub import snapshot_download; snapshot_download(repo_id=stt_mac.WHISPER_REPO)"; then
+    echo "    WARNING: couldn't pre-download the speech model."
+    echo "    Not fatal — Wingvox fetches it on first launch instead, but the"
+    echo "    first dictation will be slow. Check your connection."
+fi
+
 # ---------- 8. Default glossary ----------
 step "Setting up dictionary.txt"
 if [[ ! -f "$REPO_DIR/dictionary.txt" ]]; then
