@@ -3,244 +3,440 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wingvox — fully offline voice dictation</title>
-<meta name="description" content="Hold your hotkey, speak, release. Fully offline voice dictation that runs entirely on your device.">
+<title>Wingvox — offline voice dictation</title>
+<meta name="description" content="Hold a key, say it, it's typed. Offline voice dictation for Mac and Windows. Your voice never leaves your computer.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
+  /* Warm, slightly clay-toned palette: cream and brown carry the page, and
+     salmon is spent only on things you can act on (the key, the copy
+     button, the step numbers) so "interactive" reads as one colour. */
   :root {
     color-scheme: light dark;
-    --bg: #ffffff;
-    --fg: #1a1a1a;
-    --muted: #5f6368;
-    --card: #f5f5f7;
-    --border: #e0e0e3;
-    --accent: #2f6fed;
-    --accent-fg: #ffffff;
-    --code-bg: #1e1e24;
-    --code-fg: #e7e7ea;
-    --warn-bg: #fff8e6;
-    --warn-border: #f0dca0;
+    --cream:   #F2EADF;
+    --bone:    #FBF7F1;
+    --ink:     #17120E;
+    --brown:   #6B4530;
+    --clay:    #7F5F49;
+    --salmon:  #E8735A;
+    /* Bright salmon is beautiful as a fill and unreadable as text: on cream
+       it lands at 2.5:1, which fails even the large-text bar. Anything
+       salmon-coloured that is actually *words* uses this deeper rust
+       instead (4.75:1), so the accent still reads as one colour family. */
+    --rust:    #B44029;
+    --line:    #DFD1C0;
+
+    --bg: var(--cream);
+    --surface: var(--bone);
+    --fg: var(--ink);
+    --muted: #7A6152;
+    --accent: var(--salmon);
+    --accent-fg: #2A100A;
+    --rule: var(--line);
+    --keycap-face: #FBF7F1;
+    --keycap-edge: #D9C6B2;
+
+    --display: "Bricolage Grotesque", "Helvetica Neue", sans-serif;
+    --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #121212;
-      --fg: #f0f0f2;
-      --muted: #a3a3a8;
-      --card: #1c1c1f;
-      --border: #303034;
-      --accent: #5b8cf5;
-      --accent-fg: #0b1020;
-      --code-bg: #0b0b0e;
-      --code-fg: #d8d8dd;
-      --warn-bg: #2a2412;
-      --warn-border: #5a4a1a;
+      --bg: #141110;
+      --surface: #1F1A17;
+      --fg: #F2EADF;
+      --muted: #B49E8D;
+      --brown: #C08E68;
+      --clay: #A9866D;
+      /* On the dark ground the bright salmon already clears 6.3:1, so text
+         and fills can share it again. */
+      --rust: #E8735A;
+      --rule: #332A24;
+      --accent-fg: #1A0A06;
+      --keycap-face: #262019;
+      --keycap-edge: #3B3027;
     }
   }
+
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.5;
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
   }
-  .wrap {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 64px 24px 96px;
-  }
-  header.hero { text-align: center; margin-bottom: 48px; }
-  header.hero img {
-    width: 96px;
-    height: 96px;
-    object-fit: contain;
-    margin-bottom: 16px;
-  }
-  h1 { font-size: 2.1rem; margin: 0 0 8px; }
-  .tagline { color: var(--muted); font-size: 1.15rem; margin: 0 auto; max-width: 520px; }
-  section { margin-bottom: 40px; }
-  h2 { font-size: 1.05rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 12px; }
+  .wrap { max-width: 840px; margin: 0 auto; padding: 0 24px; }
 
-  .os-tabs {
-    display: inline-flex;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 3px;
-    margin-bottom: 12px;
-  }
-  .os-tab {
-    border: none;
-    background: transparent;
-    color: var(--muted);
-    font-size: 0.85rem;
-    font-weight: 600;
-    padding: 6px 16px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .os-tab.active {
-    background: var(--accent);
-    color: var(--accent-fg);
-  }
-  .install-box {
-    background: var(--code-bg);
-    color: var(--code-fg);
-    border-radius: 10px;
-    padding: 16px 18px;
+  /* ---------- eyebrow labels ---------- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin: 0 0 14px;
     display: flex;
     align-items: center;
     gap: 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.92rem;
-    overflow-x: auto;
   }
-  .install-box code { white-space: pre; flex: 1; }
-  .copy-btn {
-    flex-shrink: 0;
-    background: var(--accent);
-    color: var(--accent-fg);
-    border: none;
-    border-radius: 6px;
-    padding: 8px 14px;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .copy-btn:hover { opacity: 0.9; }
-  .requirement {
-    margin-top: 10px;
-    font-size: 0.9rem;
-    color: var(--muted);
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
   }
 
-  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
-  @media (max-width: 640px) { .steps { grid-template-columns: repeat(2, 1fr); } }
+  /* ---------- hero ---------- */
+  .hero { padding: 72px 0 8px; }
+  .wordmark {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.34em;
+    text-transform: uppercase;
+    color: var(--brown);
+    margin: 0 0 56px;
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 48px;
+    align-items: center;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 800;
+    font-size: clamp(2.7rem, 7vw, 4.3rem);
+    line-height: 0.98;
+    letter-spacing: -0.03em;
+    margin: 0 0 22px;
+  }
+  h1 .said { color: var(--rust); }
+  .lede {
+    font-size: 1.08rem;
+    color: var(--muted);
+    margin: 0 0 10px;
+    max-width: 34ch;
+  }
+  .privacy {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--brown);
+    margin: 0;
+  }
+
+  /* ---------- the keycap: the one thing this page is remembered by ---------- */
+  .demo { display: flex; flex-direction: column; align-items: center; gap: 22px; }
+  .keycap {
+    appearance: none;
+    width: 132px; height: 132px;
+    border: none;
+    border-radius: 20px;
+    background: var(--keycap-face);
+    box-shadow:
+      0 8px 0 var(--keycap-edge),
+      0 10px 22px rgba(60, 34, 20, 0.18);
+    color: var(--fg);
+    cursor: pointer;
+    display: grid;
+    place-content: center;
+    gap: 6px;
+    transition: transform 90ms ease, box-shadow 90ms ease;
+  }
+  .keycap:hover { transform: translateY(2px); box-shadow: 0 6px 0 var(--keycap-edge), 0 8px 18px rgba(60,34,20,.18); }
+  .keycap.down {
+    transform: translateY(8px);
+    box-shadow: 0 0 0 var(--keycap-edge), 0 3px 10px rgba(60,34,20,.22);
+  }
+  .keycap .glyph { font-family: var(--display); font-size: 2.6rem; font-weight: 600; line-height: 1; }
+  .keycap .cap-label {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--clay);
+  }
+  .keycap:focus-visible { outline: 3px solid var(--salmon); outline-offset: 4px; }
+
+  /* the status pill, mirroring what the app actually draws on screen */
+  .pill {
+    min-width: 190px;
+    height: 42px;
+    border-radius: 21px;
+    background: var(--ink);
+    color: var(--cream);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 0 18px;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 180ms ease, transform 180ms ease;
+  }
+  .pill.on { opacity: 1; transform: none; }
+  .pill .bar {
+    width: 3px;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--salmon);
+  }
+  .pill.rec .bar { animation: talk 620ms ease-in-out infinite; }
+  .pill .bar:nth-child(2) { animation-delay: 80ms; }
+  .pill .bar:nth-child(3) { animation-delay: 160ms; }
+  .pill .bar:nth-child(4) { animation-delay: 240ms; }
+  .pill .bar:nth-child(5) { animation-delay: 320ms; }
+  .pill .bar:nth-child(6) { animation-delay: 400ms; }
+  .pill .bar:nth-child(7) { animation-delay: 480ms; }
+  @keyframes talk {
+    0%, 100% { height: 6px; }
+    50%      { height: 22px; }
+  }
+  .caret { display: inline-block; width: 2px; height: 1em; background: var(--salmon); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .typed {
+    width: 100%;
+    min-height: 62px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-size: 0.95rem;
+    color: var(--fg);
+  }
+  .typed .hint { color: var(--clay); font-family: var(--mono); font-size: 0.78rem; }
+
+  /* ---------- sections ---------- */
+  section { padding: 60px 0; border-top: 1px solid var(--rule); }
+  section:first-of-type { border-top: none; }
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.6rem;
+    letter-spacing: -0.02em;
+    margin: 0 0 20px;
+  }
+
+  /* ---------- install ---------- */
+  .os-tabs { display: inline-flex; gap: 4px; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 4px; margin-bottom: 14px; }
+  .os-tab {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    padding: 7px 18px;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .os-tab.active { background: var(--ink); color: var(--cream); }
+  .os-tab:focus-visible { outline: 2px solid var(--salmon); outline-offset: 2px; }
+
+  .install-box {
+    background: var(--ink);
+    border-radius: 14px;
+    padding: 6px 6px 6px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .install-box code {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 0.86rem;
+    color: #F0E4D6;
+    overflow-x: auto;
+    white-space: pre;
+    padding: 12px 0;
+  }
+  .copy-btn {
+    flex-shrink: 0;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    background: var(--salmon);
+    color: var(--accent-fg);
+    border: none;
+    border-radius: 9px;
+    padding: 13px 20px;
+    cursor: pointer;
+  }
+  .copy-btn:hover { filter: brightness(1.06); }
+  .copy-btn:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  .requirement { font-size: 0.94rem; color: var(--muted); margin: 14px 0 0; }
+
+  /* ---------- walkthrough: a real sequence, so it earns its numbers ---------- */
+  .walkthrough { counter-reset: wv; list-style: none; margin: 0; padding: 0; }
+  .walkthrough li {
+    counter-increment: wv;
+    display: grid;
+    grid-template-columns: 40px 1fr;
+    gap: 18px;
+    padding: 20px 0;
+    border-top: 1px solid var(--rule);
+    font-size: 0.98rem;
+  }
+  .walkthrough li:first-child { border-top: none; padding-top: 4px; }
+  .walkthrough li::before {
+    content: counter(wv, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--rust);
+    padding-top: 2px;
+  }
+
+  /* ---------- how it works ---------- */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
   .step {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px 14px;
-    text-align: center;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 18px 16px;
     font-size: 0.9rem;
   }
-  .step .num {
-    display: inline-block;
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: 0.78rem;
-    font-weight: 700;
-    line-height: 22px;
+  .step .k {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--clay);
     margin-bottom: 8px;
   }
 
-  .walkthrough {
-    counter-reset: wv;
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  .walkthrough li {
-    position: relative;
-    counter-increment: wv;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px 14px 52px;
-    margin-bottom: 10px;
-    font-size: 0.94rem;
-  }
-  .walkthrough li::before {
-    content: counter(wv);
-    position: absolute;
-    left: 16px;
-    top: 14px;
-    width: 24px; height: 24px;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: 0.8rem;
-    font-weight: 700;
-    text-align: center;
-    line-height: 24px;
-  }
-
+  /* ---------- notice ---------- */
   .notice {
-    background: var(--warn-bg);
-    border: 1px solid var(--warn-border);
-    border-radius: 10px;
-    padding: 16px 18px;
-    font-size: 0.9rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--brown);
+    border-radius: 0 12px 12px 0;
+    padding: 20px 22px;
+    font-size: 0.95rem;
   }
-  .notice ul { margin: 8px 0 0; padding-left: 20px; }
+  .notice ul { margin: 12px 0 12px; padding-left: 20px; }
+  .notice li { margin-bottom: 7px; }
+
+  a { color: var(--rust); text-decoration-thickness: 1px; text-underline-offset: 2px; }
 
   footer {
-    text-align: center;
-    color: var(--muted);
-    font-size: 0.85rem;
-    border-top: 1px solid var(--border);
-    padding-top: 24px;
+    border-top: 1px solid var(--rule);
+    padding: 28px 0 60px;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    letter-spacing: 0.04em;
+    color: var(--clay);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
   }
-  footer a { color: var(--accent); }
-  a { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+    .steps { grid-template-columns: repeat(2, 1fr); }
+    .hero { padding-top: 48px; }
+    .wordmark { margin-bottom: 36px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; scroll-behavior: auto; }
+  }
 </style>
 </head>
 <body>
+
 <div class="wrap">
 
   <header class="hero">
-    <img src="wingvox_bird.png" alt="Wingvox logo">
-    <h1>Wingvox</h1>
-    <p class="tagline">Hold your dictation hotkey, speak, release. Fully offline voice dictation that runs entirely on your device &mdash; nothing leaves it.</p>
+    <p class="wordmark">Wingvox</p>
+    <div class="hero-grid">
+      <div>
+        <h1>Hold a key.<br>Say it.<br><span class="said">It's typed.</span></h1>
+        <p class="lede">Voice dictation for Mac and Windows that runs entirely on your own machine.</p>
+        <p class="privacy">No account. No internet. No recordings kept.</p>
+      </div>
+
+      <div class="demo">
+        <button class="keycap" id="keycap" aria-label="Try it: hold the key and speak">
+          <span class="glyph">⌥</span>
+          <span class="cap-label">Right Option</span>
+        </button>
+        <div class="pill" id="pill" aria-hidden="true">
+          <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+          <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+          <span class="bar"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="typed" id="typed" style="margin-top:36px">
+      <span class="hint">Press the key above</span>
+    </div>
   </header>
 
   <section>
-    <h2>Install</h2>
+    <p class="eyebrow">Install</p>
+    <h2>One command, then you're done</h2>
     <div class="os-tabs" role="tablist">
-      <button class="os-tab" data-os="mac" onclick="selectOS('mac')" role="tab">Mac</button>
+      <button class="os-tab" data-os="mac" onclick="selectOS('mac')" role="tab">macOS</button>
       <button class="os-tab" data-os="windows" onclick="selectOS('windows')" role="tab">Windows</button>
     </div>
     <div class="install-box">
       <code id="install-cmd"></code>
-      <button class="copy-btn" onclick="copyInstall()">Copy</button>
+      <button class="copy-btn" id="copy-btn" onclick="copyInstall()">Copy</button>
     </div>
     <p class="requirement" id="install-requirement"></p>
   </section>
 
   <section>
-    <h2>What happens after you paste it</h2>
+    <p class="eyebrow">What happens after you paste it</p>
+    <h2>Nothing here is a mistake</h2>
     <ol class="walkthrough" id="install-walkthrough"></ol>
     <!-- Drop a screen recording of a real install in here when you have one.
          Watching it work once removes most of the hesitation about pasting a
          command into a terminal:
          <video src="install-demo.mp4" controls muted playsinline
-                style="width:100%;border-radius:10px;border:1px solid var(--border);margin-top:20px"></video> -->
+                style="width:100%;border-radius:12px;border:1px solid var(--rule);margin-top:24px"></video> -->
   </section>
 
   <section>
-    <h2>How it works</h2>
+    <p class="eyebrow">How it works</p>
+    <h2>Everything runs on your machine</h2>
     <div class="steps">
-      <div class="step"><span class="num">1</span><br>Hold your hotkey and speak</div>
-      <div class="step"><span class="num">2</span><br>Audio is transcribed on-device</div>
-      <div class="step"><span class="num">3</span><br>A local LLM cleans it up</div>
-      <div class="step"><span class="num">4</span><br>Pastes wherever your cursor is focused</div>
+      <div class="step"><span class="k">Hold</span>Press your hotkey and start talking.</div>
+      <div class="step"><span class="k">Hear</span>Speech becomes text, on your own device.</div>
+      <div class="step"><span class="k">Tidy</span>A local model strips the ums and fixes punctuation.</div>
+      <div class="step"><span class="k">Paste</span>The text lands wherever your cursor is.</div>
     </div>
   </section>
 
   <section>
-    <h2>Before you install</h2>
+    <p class="eyebrow">Before you install</p>
+    <h2>Worth knowing first</h2>
     <div class="notice">
-      This is a personal project, shared as-is in case it's useful to others, not a polished
-      product with official support. Worth knowing before you run the command above:
+      A personal project, shared as-is in case it's useful to you. Not a polished product
+      with official support.
       <ul id="install-notice"></ul>
-      Prefer to read the code first? See the
-      <a href="https://github.com/bogin43/wingvox">source and full README on GitHub</a>.
+      Prefer to read the code first? The
+      <a href="https://github.com/bogin43/wingvox">full source and README are on GitHub</a>.
     </div>
   </section>
 
   <footer>
-    <a href="https://github.com/bogin43/wingvox">Source on GitHub</a> &middot; MIT licensed
+    <span><a href="https://github.com/bogin43/wingvox">Source on GitHub</a></span>
+    <span>MIT licensed</span>
   </footer>
 
 </div>
@@ -249,38 +445,35 @@
 const OS_DATA = {
   mac: {
     cmd: 'curl -fsSL https://bogin43.github.io/wingvox/mac | bash',
-    requirement: 'Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal (press ⌘ + Space, type "terminal", hit Return), paste this, and press Return.',
-    // Written to be read *before* starting, so nothing during the install is
-    // a surprise. The password step and the invisible typing are where
-    // people stop and assume something has gone wrong.
+    requirement: 'Needs an Apple Silicon Mac (M1, M2, M3 or M4). Open Terminal — press ⌘ + Space, type "terminal", press Return — then paste this and press Return.',
     walkthrough: [
-      'It asks for your Mac password. This is Homebrew, which Wingvox needs to install. <strong>Nothing appears as you type</strong> &mdash; no dots, no cursor movement. That is normal. Type it and press Return.',
-      'It downloads about 3.5GB of speech and language models. Expect 10&ndash;30 minutes depending on your connection. You can leave it running.',
+      'It asks for your Mac password, because it installs Homebrew. <strong>Nothing appears as you type</strong> — no dots, no moving cursor. That is normal. Type it and press Return.',
+      'It downloads about 3.5GB of speech and language models. Expect 10 to 30 minutes depending on your connection. You can leave it running.',
       'A microphone request appears. Click <strong>Allow</strong>.',
-      'An Accessibility request appears. Click <strong>Open System Settings</strong>, then switch <strong>Wingvox</strong> on. It restarts itself once you do.',
-      'Hold <strong>Right Option</strong>, say something, let go. Your words appear wherever your cursor is.'
+      'An Accessibility request appears. Click <strong>Open System Settings</strong> and switch <strong>Wingvox</strong> on. It restarts itself once you do.',
+      'Hold <strong>Right Option</strong>, say something, let go. Your words land wherever your cursor is.'
     ],
     notice: [
-      'It requests <strong>Microphone</strong> and <strong>Accessibility</strong> permissions &mdash; needed to hear you and to paste text into other apps.',
-      'It installs Homebrew, Xcode Command Line Tools, and Ollama if they’re missing on your Mac.',
-      'Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it’s all private.'
+      'It asks for <strong>Microphone</strong> and <strong>Accessibility</strong> permission, to hear you and to paste into other apps.',
+      'It installs Homebrew, Xcode Command Line Tools and Ollama if your Mac does not already have them.',
+      'Transcription and cleanup both happen locally, so no audio or text is sent anywhere.'
     ]
   },
   windows: {
     cmd: 'irm https://bogin43.github.io/wingvox/windows | iex',
-    requirement: 'Requires Windows 10/11 with winget. Open PowerShell (press Start, type "powershell", hit Enter), paste this, and press Enter.',
+    requirement: 'Needs Windows 10 or 11 with winget. Open PowerShell — press Start, type "powershell", press Enter — then paste this and press Enter.',
     walkthrough: [
-      'It downloads about 3.5GB of speech and language models. Expect 10&ndash;30 minutes depending on your connection. You can leave it running.',
-      'Windows may show <strong>“Windows protected your PC”</strong>. Click <strong>More info</strong>, then <strong>Run anyway</strong>. This appears because the app isn’t code-signed yet, not because anything is wrong.',
+      'It downloads about 3.5GB of speech and language models. Expect 10 to 30 minutes depending on your connection. You can leave it running.',
+      'Windows may say <strong>“Windows protected your PC”</strong>. Click <strong>More info</strong>, then <strong>Run anyway</strong>. That appears because the app is not code-signed yet, not because anything is wrong.',
       'Allow microphone access if Windows asks.',
-      'Hold <strong>Right Alt</strong>, say something, let go. Your words appear wherever your cursor is.'
+      'Hold <strong>Right Alt</strong>, say something, let go. Your words land wherever your cursor is.'
     ],
     notice: [
-      'It requests <strong>Microphone</strong> access &mdash; needed to capture audio.',
-      'The first launch shows a SmartScreen warning since this build isn’t code-signed yet &mdash; click "More info" then "Run anyway".',
-      'It installs Ollama and Python if they’re missing.',
-      'Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it’s all private.',
-      'Windows support is new — if you hit an issue, please report it on GitHub.'
+      'It asks for <strong>Microphone</strong> access, to hear you.',
+      'The first launch shows a SmartScreen warning, because this build is not code-signed yet. Click "More info" then "Run anyway".',
+      'It installs Ollama and Python if your PC does not already have them.',
+      'Transcription and cleanup both happen locally, so no audio or text is sent anywhere.',
+      'Windows support is new. If you hit a problem, please report it on GitHub.'
     ]
   }
 };
@@ -290,24 +483,65 @@ function selectOS(os) {
   document.getElementById('install-cmd').textContent = data.cmd;
   document.getElementById('install-requirement').textContent = data.requirement;
   document.getElementById('install-notice').innerHTML = data.notice.map(n => `<li>${n}</li>`).join('');
-  document.getElementById('install-walkthrough').innerHTML =
-    data.walkthrough.map(s => `<li>${s}</li>`).join('');
-  document.querySelectorAll('.os-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.os === os);
-  });
+  document.getElementById('install-walkthrough').innerHTML = data.walkthrough.map(s => `<li>${s}</li>`).join('');
+  document.querySelectorAll('.os-tab').forEach(b => b.classList.toggle('active', b.dataset.os === os));
+  currentOS = os;
 }
 
 function copyInstall() {
-  const text = document.getElementById('install-cmd').textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('.copy-btn');
-    const original = btn.textContent;
+  const btn = document.getElementById('copy-btn');
+  navigator.clipboard.writeText(document.getElementById('install-cmd').textContent).then(() => {
     btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = original; }, 1500);
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1600);
+  }).catch(() => {
+    btn.textContent = 'Press ⌘C';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1600);
   });
 }
 
-selectOS(/Win/i.test(navigator.userAgent) ? 'windows' : 'mac');
+let currentOS = /Win/i.test(navigator.userAgent) ? 'windows' : 'mac';
+selectOS(currentOS);
+
+/* The hero demo: press the key, watch the pill listen, watch the words land.
+   It is the whole product in one gesture, so it is the only animation on the
+   page that does anything elaborate. */
+const keycap = document.getElementById('keycap');
+const pill = document.getElementById('pill');
+const typed = document.getElementById('typed');
+const PHRASE = "Wingvox types what I say, right where my cursor is.";
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let running = false;
+
+function runDemo() {
+  if (running) return;
+  running = true;
+  keycap.classList.add('down');
+  pill.classList.add('on', 'rec');
+  typed.innerHTML = '<span class="hint">Listening</span>';
+
+  if (reduced) { finish(); return; }
+  setTimeout(finish, 1700);
+
+  function finish() {
+    keycap.classList.remove('down');
+    pill.classList.remove('rec');
+    typed.innerHTML = '<span id="out"></span><span class="caret"></span>';
+    const out = document.getElementById('out');
+    if (reduced) { out.textContent = PHRASE; done(); return; }
+    let i = 0;
+    const tick = setInterval(() => {
+      out.textContent = PHRASE.slice(0, ++i);
+      if (i >= PHRASE.length) { clearInterval(tick); done(); }
+    }, 32);
+  }
+  function done() {
+    pill.classList.remove('on');
+    setTimeout(() => { running = false; }, 400);
+  }
+}
+
+keycap.addEventListener('click', runDemo);
+if (!reduced) setTimeout(runDemo, 900);
 </script>
 
 </body>
