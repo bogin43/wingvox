@@ -10,8 +10,8 @@ Pipeline: mic -> Whisper (mlx-whisper on Mac, faster-whisper on Windows) -> Olla
 qwen2.5:3b cleanup -> clipboard + paste.
 
 > This is a personal project, shared as-is in case it's useful to others, not a
-> polished product with official support. On Mac it requires **Microphone**,
-> **Accessibility**, and **Input Monitoring** permissions (see below for why); on
+> polished product with official support. On Mac it requires **Microphone** and
+> **Accessibility** permissions (see below for why); on
 > Windows, **Microphone** access and an antivirus that doesn't block global hotkeys.
 > The installer will install Homebrew/Xcode Command Line Tools/Ollama (Mac) or
 > winget/Ollama (Windows) if they're missing. Read the script before running it if
@@ -25,7 +25,7 @@ qwen2.5:3b cleanup -> clipboard + paste.
 Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash
+curl -fsSL https://bogin43.github.io/wingvox/mac | bash
 ```
 
 This clones the repo to `~/wingvox` and runs the installer. Prefer to see the
@@ -52,7 +52,7 @@ Requires `winget` (ships with modern Windows 10/11; see [aka.ms/getwinget](https
 if missing) and `git`. Open PowerShell and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.ps1 | iex
+irm https://bogin43.github.io/wingvox/windows | iex
 ```
 
 This clones the repo to `%USERPROFILE%\wingvox` and runs the installer. Prefer to

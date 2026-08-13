@@ -1,0 +1,24 @@
+#!/bin/bash
+# Short entry point for the Mac install, served by GitHub Pages so the
+# command people copy reads
+#   curl -fsSL https://bogin43.github.io/wingvox/mac | bash
+# instead of a long raw.githubusercontent.com URL. On camera and in writing
+# that matters: a github.io address looks like a website, a raw content URL
+# looks like something you shouldn't paste into a terminal.
+#
+# This only forwards to bootstrap.sh in the repo root, so there's exactly
+# one copy of the real logic to keep correct.
+set -euo pipefail
+
+BOOTSTRAP="https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh"
+
+tmp="$(mktemp)"
+if ! curl -fsSL "$BOOTSTRAP" -o "$tmp"; then
+    echo "Couldn't download the Wingvox installer from GitHub." >&2
+    echo "Check your internet connection and try again." >&2
+    exit 1
+fi
+# Run it from a file rather than piping: the installer's own child processes
+# (Homebrew's, notably) read from the terminal, and nesting one curl|bash
+# inside another leaves stdin pointed at the script text instead.
+exec bash "$tmp"

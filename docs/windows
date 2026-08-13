@@ -1,0 +1,18 @@
+# Short entry point for the Windows install, served by GitHub Pages so the
+# command people copy reads
+#   irm https://bogin43.github.io/wingvox/windows | iex
+# instead of a long raw.githubusercontent.com URL.
+#
+# This only forwards to bootstrap.ps1 in the repo root, so there's exactly
+# one copy of the real logic to keep correct.
+$ErrorActionPreference = "Stop"
+
+$bootstrap = "https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.ps1"
+
+try {
+    $script = Invoke-RestMethod -Uri $bootstrap
+} catch {
+    Write-Error "Couldn't download the Wingvox installer from GitHub. Check your internet connection and try again."
+    exit 1
+}
+Invoke-Expression $script
