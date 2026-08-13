@@ -852,9 +852,16 @@ def run():
         # spending 45s discovering that just delays the hint that says so.
         if not wait_for_ollama(45.0 if launched or ollama_installed() else 3.0):
             state["warm"] = True
-            ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
-            status(f"⚠ Ollama not running — will paste raw transcripts "
-                   f"(fix: {ollama_hint})", "orange", hide_after=10)
+            if not ollama_installed():
+                # No Ollama on the machine at all is the lite install, not a
+                # fault -- telling someone to fix a thing they chose is just
+                # nagging. Say what it means and move on.
+                status(f"✓ Ready — hold {HOTKEY_LABEL} to dictate "
+                       f"(cleanup off, pasting as spoken)", "green", hide_after=5)
+            else:
+                ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
+                status(f"⚠ Ollama not running — will paste raw transcripts "
+                       f"(fix: {ollama_hint})", "orange", hide_after=10)
         elif not ollama_model_pulled():
             state["warm"] = True
             status(f"⚠ Ollama model not pulled — will paste raw transcripts "

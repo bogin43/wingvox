@@ -38,10 +38,21 @@ cd ~/wingvox
 ```
 
 Installs Homebrew/Ollama/Python as needed, builds `Wingvox.app`, and sets it up to
-start automatically at login. Takes a few minutes, longer on a slow connection (the
-Whisper model is ~1.5GB, the cleanup model another ~2GB — expect ~4GB of downloads
-total on first run). Then see `SETUP.md` for the one-time macOS permission steps
-it can't do for you.
+start automatically at login. Takes a few minutes, longer on a slow connection: the
+speech model is ~0.5GB and the cleanup model another ~1.8GB, so budget **~2.6GB**
+for everything. Then see `SETUP.md` for the one-time macOS permission steps it
+can't do for you.
+
+**Smaller install.** The cleanup model is most of that download. To skip it:
+
+```bash
+WINGVOX_LITE=1 bash -c "$(curl -fsSL https://bogin43.github.io/wingvox/mac)"
+```
+
+That brings the install down to about **0.9GB**. Dictation still works — Whisper
+already produces punctuated text — but you lose the cleanup pass that strips
+"um" and "so like" and tidies sentence boundaries. Re-run the normal installer
+any time to add it.
 
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.

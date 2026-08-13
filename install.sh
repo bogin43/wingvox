@@ -72,29 +72,40 @@ brew list python@3.12 &>/dev/null || brew install python@3.12
 PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
 echo "    OK — using $PYTHON_BIN"
 
-# ---------- 5. Ollama ----------
-step "Checking for Ollama"
-brew list ollama &>/dev/null || brew install ollama
-brew services start ollama &>/dev/null || true
-echo -n "    Waiting for Ollama to come up"
-for i in $(seq 1 20); do
-    if curl -s -o /dev/null http://localhost:11434/api/version; then
-        echo " — ready."
-        break
-    fi
-    echo -n "."
-    sleep 1
-    if [[ "$i" == 20 ]]; then
-        echo
-        echo "Ollama didn't come up after 20s. Try 'brew services restart ollama'" >&2
-        echo "and re-run this script." >&2
-        exit 1
-    fi
-done
+# ---------- 5 & 6. Ollama and the cleanup model ----------
+# WINGVOX_LITE=1 skips both. The cleanup model is 1.8GB of the ~2.6GB
+# install, so leaving it out is the difference between a ~0.9GB download and
+# a ~2.6GB one. Dictation still works: Whisper already produces punctuated
+# text, and flow.py falls back to pasting the raw transcript whenever the
+# cleanup step is unavailable. What you lose is filler removal ("um", "so
+# like", false starts) and the tidier sentence boundaries.
+if [[ "${WINGVOX_LITE:-}" == "1" ]]; then
+    step "Skipping Ollama (WINGVOX_LITE=1)"
+    echo "    Dictation will paste raw transcripts, without the cleanup pass."
+    echo "    To add it later, re-run this installer without WINGVOX_LITE."
+else
+    step "Checking for Ollama"
+    brew list ollama &>/dev/null || brew install ollama
+    brew services start ollama &>/dev/null || true
+    echo -n "    Waiting for Ollama to come up"
+    for i in $(seq 1 20); do
+        if curl -s -o /dev/null http://127.0.0.1:11434/api/version; then
+            echo " — ready."
+            break
+        fi
+        echo -n "."
+        sleep 1
+        if [[ "$i" == 20 ]]; then
+            echo
+            echo "Ollama didn't come up after 20s. Try 'brew services restart ollama'" >&2
+            echo "and re-run this script." >&2
+            exit 1
+        fi
+    done
 
-# ---------- 6. Pull the cleanup model ----------
-step "Pulling the qwen2.5:3b cleanup model (this may take a while on first run)"
-ollama pull qwen2.5:3b
+    step "Pulling the qwen2.5:3b cleanup model (this may take a while on first run)"
+    ollama pull qwen2.5:3b
+fi
 
 # ---------- 7. Python virtual environment ----------
 step "Setting up the Python environment"
@@ -109,8 +120,11 @@ VENV_PY="$REPO_DIR/venv/bin/python"
 step "Installing Python dependencies"
 "$VENV_PY" -m pip install --upgrade pip -q
 "$VENV_PY" -m pip install -r requirements.txt -q
+# sympy/networkx/pillow arrive as torch's dependencies and stay behind once
+# torch is removed -- pip reports no Required-by for any of them, and
+# nothing in Wingvox imports them. ~103MB for packages that never load.
 echo "    Removing unused transitive dependencies (torch/numba/scipy/llvmlite)…"
-"$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite -q 2>/dev/null || true
+"$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite sympy networkx pillow -q 2>/dev/null || true
 
 # ---------- 7b. Pre-download the Whisper model ----------
 # mlx-whisper fetches its weights lazily on first use, so without this the

@@ -76,18 +76,19 @@ with your transcribed text once it pastes.
 
 ### Reference: other Whisper model sizes (Mac)
 
-Wingvox ships with `whisper-large-v3-turbo` (~1.5GB), the best balance of
-speed and accuracy. If you ever want to try a smaller model — for a slow
-connection or an older Mac — these are the other options (edit
-`WHISPER_REPO` in `stt_mac.py`, prefixed with `mlx-community/`):
+Wingvox ships with `whisper-large-v3-turbo-q4` (~0.5GB), a 4-bit build of
+the turbo model. It matched the full-precision version on every test clip
+here while being a third of the size. If you ever want to try a smaller model — for a slow
+connection or an older Mac — these are the other options (set `WINGVOX_WHISPER_REPO`, prefixed with `mlx-community/`):
 
 | Model | Approx. size | Accuracy |
 |---|---|---|
 | `whisper-tiny` | ~75MB | Rough — fine for short commands, not real dictation |
 | `whisper-base` | ~145MB | Still rough for natural speech |
 | `whisper-small` | ~500MB | Usable, a clear step down from turbo |
-| `whisper-medium` | ~1.5GB | Similar size to turbo, similar-ish accuracy |
-| `whisper-large-v3-turbo` (default) | ~1.5GB | Best balance — what's used out of the box |
+| `whisper-medium` | ~1.5GB | Similar size to full turbo, similar-ish accuracy |
+| `whisper-large-v3-turbo-q4` (default) | ~0.5GB | What's used out of the box |
+| `whisper-large-v3-turbo` | ~1.6GB | Full precision. Matched q4 on every clip tested here |
 | `whisper-large-v3` | ~2.9GB | Marginally better than turbo, slower, bigger download |
 
 This isn't something you need to change — just here in case it's useful
