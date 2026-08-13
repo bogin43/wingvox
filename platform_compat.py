@@ -48,20 +48,36 @@ if IS_WINDOWS:
     VK_RMENU = 0xA5
 
     def is_hotkey_physically_down() -> bool:
-        """pynput's low-level keyboard hook has been observed to silently
-        drop the on_release callback for Right Alt/AltGr specifically on
-        some Windows setups (seen under UTM VM keyboard passthrough) --
-        the press fires, the matching release never does, leaving a
-        recording stuck open forever. GetAsyncKeyState reads the actual
-        current hardware key state directly from Windows, independent of
-        whatever the hook chose to deliver, so callers can poll it as a
-        fallback for a release the hook missed. Checks exactly the key
-        HOTKEY_KEYS accepts -- polling Left Alt too would keep a recording
-        alive for an unrelated Alt+Tab."""
+        """Whether the dictation key is physically held right now, read from
+        the hardware rather than from the keyboard hook.
+
+        The hook has been observed to silently drop the release event for
+        the dictation key (seen under UTM VM keyboard passthrough): the
+        press fires, the matching release never does, and the recording
+        stays open forever. Callers poll this as a backstop. It reports on
+        exactly the key HOTKEY_KEYS accepts -- polling Left Alt too would
+        end a recording on an unrelated Alt+Tab."""
         return bool(ctypes.windll.user32.GetAsyncKeyState(VK_RMENU) & 0x8000)
+elif IS_MAC:
+    # Right Option. Apple's virtual keycodes are physical positions, not
+    # characters, so this is stable across keyboard layouts.
+    _KVK_RIGHT_OPTION = 61
+
+    def is_hotkey_physically_down() -> bool:
+        """Mac counterpart of the Windows check above. Same purpose: a
+        dropped release must not be able to wedge a recording open, and a
+        wedged recording can only be cleared by restarting the app."""
+        try:
+            from Quartz import CGEventSourceKeyState, kCGEventSourceStateHIDSystemState
+            return bool(CGEventSourceKeyState(kCGEventSourceStateHIDSystemState,
+                                              _KVK_RIGHT_OPTION))
+        except Exception:
+            # Can't read the hardware -- claim the key is still down so the
+            # watchdog never ends a recording the user is in the middle of.
+            return True
 else:
     def is_hotkey_physically_down() -> bool:
-        return False
+        return True
 
 
 # ---------- macOS permissions ----------
@@ -158,6 +174,23 @@ def clipboard_get():
     (IsClipboardFormatAvailable needs no clipboard ownership), and report
     None so callers know there is nothing safe to restore."""
     if IS_MAC:
+        # pbpaste prints nothing and exits 0 for an image or copied files, so
+        # it can't distinguish "empty text" from "not text at all" any better
+        # than pyperclip can. Ask the pasteboard which types it actually
+        # holds first, so the None contract above is true on both platforms.
+        try:
+            from AppKit import NSPasteboard, NSPasteboardTypeString
+            board = NSPasteboard.generalPasteboard()
+            if not board.availableTypeFromArray_([NSPasteboardTypeString]):
+                return None
+            # Read through the same pasteboard we just asked, rather than
+            # forking pbpaste for text AppKit already has -- this sits on the
+            # paste path, inside the inject lock, before the keystroke.
+            text = board.stringForType_(NSPasteboardTypeString)
+            if text is not None:
+                return str(text)
+        except Exception:
+            pass  # can't determine -- fall through and treat it as text
         return subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", "replace")
     import ctypes
     CF_TEXT, CF_UNICODETEXT = 1, 13
@@ -249,24 +282,36 @@ def release_all_modifiers(kb) -> None:
 
 # ---------- Windows: no console under a --windowed PyInstaller build ----------
 
-def setup_windows_console_log(log_path: Path, max_bytes: int = 5_000_000) -> None:
-    """A --windowed frozen exe has no console at all, so print()/stderr have
-    nowhere to go (and can raise on some builds where sys.stdout is None).
-    Task Scheduler, unlike launchd's StandardOutPath, doesn't capture
-    stdout/stderr for us, so redirect them to a file ourselves.
+def rotate_log(log_path: Path, max_bytes: int = 5_000_000) -> None:
+    """Keep one .old generation once the log passes max_bytes.
 
-    Wingvox runs at every logon and appends for the life of the install, so
-    rotate once past max_bytes (keeping a single .old generation) rather than
-    growing one file without bound forever."""
-    if not IS_WINDOWS:
-        return
+    Call it before the file is opened for writing.
+
+    Windows only, despite the platform-neutral shape. On the Mac launchd
+    opens wingvox.log itself (StandardOutPath in the plist) and hands the
+    process an already-open descriptor, so renaming the file at startup
+    doesn't redirect anything -- the whole session keeps writing into
+    wingvox.log.old, which the next rotation then deletes. Rotating a
+    launchd-owned stream has to happen outside the app (a newsyslog.d
+    entry), or the app has to stop using StandardOutPath and open its own
+    log on both platforms. Until then the Mac log still grows unbounded."""
     try:
         if log_path.exists() and log_path.stat().st_size > max_bytes:
             previous = log_path.parent / (log_path.name + ".old")
             previous.unlink(missing_ok=True)
             log_path.rename(previous)
     except OSError:
-        pass  # rotation is best-effort; never block startup over it
+        pass  # best-effort; never block startup over it
+
+
+def setup_windows_console_log(log_path: Path) -> None:
+    """A --windowed frozen exe has no console at all, so print()/stderr have
+    nowhere to go (and can raise on some builds where sys.stdout is None).
+    Task Scheduler, unlike launchd's StandardOutPath, doesn't capture
+    stdout/stderr for us, so redirect them to a file ourselves."""
+    if not IS_WINDOWS:
+        return
+    rotate_log(log_path)  # must happen before the file is opened for append
     log = open(log_path, "a", buffering=1, encoding="utf-8")
     sys.stdout = log
     sys.stderr = log
@@ -294,9 +339,14 @@ def start_ollama_background() -> bool:
     """Launch `ollama serve` with no console window, detached so it outlives
     Wingvox. Returns whether a launch was attempted.
 
-    On the Mac, `brew services start ollama` gives Ollama real background
-    persistence and nothing here is needed. Windows has no equivalent:
-    ollama.exe is a CONSOLE-subsystem binary, so any logon-time launch of it
+    On the Mac this is `brew services start ollama`, the same thing
+    install.sh runs. It matters after the install too: if that service is
+    stopped, or was never started, Wingvox would otherwise paste raw
+    uncleaned transcripts indefinitely while the identical situation on
+    Windows silently repaired itself.
+
+    Windows has no service equivalent: ollama.exe is a CONSOLE-subsystem
+    binary, so any logon-time launch of it
     puts a terminal window on the user's screen. That window looks like
     leftover clutter, and closing it -- the obvious thing to do -- kills
     Ollama, after which Wingvox silently falls back to pasting raw,
@@ -307,6 +357,18 @@ def start_ollama_background() -> bool:
     (GUI-subsystem, tray icon) would be the tidier answer, but it exits
     immediately with status 1 when Task Scheduler starts it, so driving
     ollama.exe directly is the reliable path."""
+    if IS_MAC:
+        import shutil
+        if not shutil.which("brew"):
+            return False
+        try:
+            subprocess.Popen(
+                ["brew", "services", "start", "ollama"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception:
+            return False
     if not IS_WINDOWS:
         return False
     exe = find_ollama()
@@ -344,6 +406,27 @@ def open_privacy_settings(page: str = "microphone") -> None:
 
 # ---------- Windows: prefer WASAPI over PortAudio's default host API ----------
 
+def wasapi_hostapi_index(sd):
+    """Index of PortAudio's WASAPI host API, or None if there isn't one.
+
+    Single source of truth for "which host API is WASAPI". Two callers need
+    it and they must agree: one picks the default input device, the other
+    decides whether WasapiSettings may be attached to a stream. When these
+    were separate implementations they matched the name differently (one
+    case-insensitively, one not), so a PortAudio build spelling it any other
+    way would have silently dropped the WASAPI format conversion while still
+    selecting a WASAPI device."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        for i, api in enumerate(sd.query_hostapis()):
+            if "wasapi" in api["name"].lower():
+                return i
+    except Exception:
+        pass
+    return None
+
+
 def default_windows_input_device(sd):
     """PortAudio's default host API on Windows is often MME (higher latency,
     occasionally flaky) rather than WASAPI. Return WASAPI's default input
@@ -351,11 +434,10 @@ def default_windows_input_device(sd):
     if not IS_WINDOWS:
         return None
     try:
-        hostapis = sd.query_hostapis()
-        for i, api in enumerate(hostapis):
+        for api in sd.query_hostapis():
             if "wasapi" in api["name"].lower():
-                idx = api.get("default_input_device", -1)
-                return idx if idx >= 0 else None
+                device = api.get("default_input_device", -1)
+                return device if device >= 0 else None
     except Exception:
         pass
     return None

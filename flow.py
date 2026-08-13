@@ -14,6 +14,7 @@ Usage:
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
@@ -86,22 +87,14 @@ MAX_GLOSSARY_CHARS = 600
 _WASAPI_SETTINGS = sd.WasapiSettings(auto_convert=True) if pc.IS_WINDOWS else None
 
 
-def _wasapi_hostapi_index():
-    """PortAudio raises -9984 (Incompatible host API specific stream info)
-    if WasapiSettings is passed to a non-WASAPI device (WDM-KS, MME,
-    DirectSound), which the multi-device fallback in Recorder.start() below
-    can land on. Resolve WASAPI's host API index once so extra_settings can
-    be scoped to only the devices it actually applies to."""
-    try:
-        for idx, api in enumerate(sd.query_hostapis()):
-            if "WASAPI" in api["name"]:
-                return idx
-    except Exception:
-        pass
-    return None
-
-
-_WASAPI_HOSTAPI_INDEX = _wasapi_hostapi_index() if pc.IS_WINDOWS else None
+# PortAudio raises -9984 (Incompatible host API specific stream info) if
+# WasapiSettings is passed to a non-WASAPI device (WDM-KS, MME, DirectSound),
+# which the multi-device fallback in Recorder.start() below can land on.
+# Resolved through platform_compat so this and the device picker agree on
+# which host API is WASAPI -- they previously matched the name differently,
+# one case-sensitively and one not, which would silently drop the format
+# conversion while still selecting a WASAPI device.
+_WASAPI_HOSTAPI_INDEX = pc.wasapi_hostapi_index(sd)
 
 if pc.IS_MAC:
     # Only force offline mode if the model is already cached — on a fresh
@@ -120,9 +113,11 @@ if pc.IS_MAC:
         pass  # fail open: leave online so a real download can proceed
 
 # 127.0.0.1, not localhost -- Windows can resolve "localhost" via IPv6 first
-# and stall before falling back to IPv4 (the same issue install.ps1's own
-# Ollama health check hit and was fixed for; this call site was missed).
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+# and stall before falling back to IPv4. That was fixed in install.ps1 and
+# missed here, so the host lives in one constant now: a partial fix that
+# works in one code path and hangs in another is the failure mode to avoid.
+OLLAMA_BASE = "http://127.0.0.1:11434"
+OLLAMA_URL = f"{OLLAMA_BASE}/api/chat"
 OLLAMA_MODEL = "qwen2.5:3b"
 HOTKEY_LABEL = "Right Option" if pc.IS_MAC else "Right Alt"
 # Always record from the built-in mic, not whatever the system default input is
@@ -617,10 +612,15 @@ def clean_text(raw: str, dictionary: str) -> str:
 
 def ollama_available() -> bool:
     try:
-        requests.get("http://127.0.0.1:11434/api/version", timeout=3)
+        requests.get(f"{OLLAMA_BASE}/api/version", timeout=3)
         return True
     except Exception:
         return False
+
+
+def ollama_installed() -> bool:
+    """Whether there's an Ollama on this machine at all."""
+    return bool(shutil.which("ollama") or pc.find_ollama())
 
 
 def wait_for_ollama(timeout: float = 45.0) -> bool:
@@ -641,7 +641,7 @@ def wait_for_ollama(timeout: float = 45.0) -> bool:
 
 def ollama_model_pulled(model: str = OLLAMA_MODEL) -> bool:
     try:
-        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=3)
+        r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=3)
         r.raise_for_status()
         entries = r.json().get("models", [])
         names = {m.get("name") for m in entries} | {m.get("model") for m in entries}
@@ -704,12 +704,28 @@ def inject(text: str):
             _kb.press("v")
             time.sleep(0.02)
             _kb.release("v")
-        if prev_clipboard is not None:
-            time.sleep(PASTE_SETTLE_SECONDS)
+    if prev_clipboard is None:
+        return
+
+    def _restore():
+        # Waiting for the paste to land is a guess -- there's no completion
+        # signal -- so don't hold up the caller for it. Returning now means
+        # the "done" status and the latency figure describe the paste rather
+        # than the paste plus this delay, and a second dictation isn't
+        # blocked behind it.
+        time.sleep(PASTE_SETTLE_SECONDS)
+        with _inject_lock:
             try:
-                pc.clipboard_set(prev_clipboard)
+                # Only put the old clipboard back if ours is still the thing
+                # on it. Anything else means a later dictation, or the user
+                # copying something during the wait, already replaced it --
+                # and restoring over that would throw away what they copied.
+                if pc.clipboard_get() == text:
+                    pc.clipboard_set(prev_clipboard)
             except Exception:
                 pass
+
+    threading.Thread(target=_restore, daemon=True).start()
 
 
 # ---------- glue: push-to-talk loop ----------
@@ -793,25 +809,35 @@ def run():
                 return
 
     def warm_up():
+        # Kick Ollama off first and let it boot while Whisper loads. The two
+        # are independent, and running them in sequence meant the user waited
+        # for the sum: Ollama wasn't even launched until the speech model had
+        # finished loading.
+        #
+        # Nothing else reliably starts it. On Windows it has no service, and
+        # launching it from Task Scheduler at logon puts a console window on
+        # screen that kills Ollama when closed; on Mac its brew service can
+        # simply be stopped. Either way the user shouldn't need to know
+        # Ollama exists.
+        launched = not ollama_available() and pc.start_ollama_background()
+
         status("Loading speech model…", "gray")
         try:
             transcribe(np.ones(SAMPLE_RATE, dtype=np.float32) * 0.01, dictionary)
         except Exception as e:
             status(f"⚠ Speech model failed to load: {e}", "orange")
             return
-        # Start Ollama ourselves if it isn't up. On Windows nothing else
-        # reliably does: it has no background service, and launching it from
-        # Task Scheduler at logon puts a console window on screen that kills
-        # Ollama when closed. Starting it here (windowless, detached) keeps
-        # cleanup working without the user having to know Ollama exists.
-        if not ollama_available() and pc.start_ollama_background():
+        if launched:
             status("Starting Ollama…", "gray")
         # Even once started, Ollama takes a moment to bind its port -- and on
         # Mac it races Wingvox at login. A single check here would report
         # "Ollama not running" for a perfectly healthy install and, worse,
         # skip the LLM warm-up, leaving the first real cleanup to pay the
         # cold-start cost (measured at ~14s vs ~3s warm).
-        if not wait_for_ollama():
+        # Only wait out the long timeout when there's actually something to
+        # wait for. With no Ollama installed the poll can't succeed, and
+        # spending 45s discovering that just delays the hint that says so.
+        if not wait_for_ollama(45.0 if launched or ollama_installed() else 3.0):
             state["warm"] = True
             ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
             status(f"⚠ Ollama not running — will paste raw transcripts "
@@ -882,13 +908,12 @@ def run():
             if overlay:
                 overlay.show_recording()
             recorder.start()
-            if pc.IS_WINDOWS:
-                threading.Thread(target=_release_watchdog, daemon=True).start()
+            threading.Thread(target=_release_watchdog, daemon=True).start()
         # else: a repeat on_press while already recording. Windows
         # auto-repeats a held key at the OS level (confirmed: ~10/sec), so
         # this fires constantly for the entire duration of a normal hold --
         # it is not evidence of a missed release. Ignore it; _release_watchdog
-        # (Windows) / a genuine on_release (Mac) is what actually ends the
+        # or a genuine on_release is what actually ends the
         # recording.
         # NOTE: this used to `return False` here to suppress the OS's Alt
         # ribbon-hint overlay. That was wrong -- pynput treats a callback

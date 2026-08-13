@@ -142,14 +142,18 @@ Step "Installing Python dependencies"
 # on "Loading speech model..." for minutes with no progress shown anywhere,
 # which reads as a broken install. Pull it here, where the wait is expected
 # and the user can see it happening.
+# Take the model name from stt_windows rather than repeating it here: it
+# already resolves WINGVOX_WHISPER_MODEL, so this fetches whatever the app
+# will actually load. Naming it again would mean changing the default in
+# stt_windows.py silently pre-downloads the wrong weights, and the first
+# launch downloads all over again -- the exact delay this step exists to
+# remove. install.sh reads stt_mac.WHISPER_REPO the same way.
 Step "Downloading the speech model (about 1GB -- one time)"
-$env:WINGVOX_WHISPER_MODEL = $null
 & $VenvPy -c @"
-import os, sys
+import stt_windows
 from faster_whisper import WhisperModel
-model = os.environ.get('WINGVOX_WHISPER_MODEL') or 'small.en'
-print('    Fetching ' + model + ' ...')
-WhisperModel(model, device='auto', compute_type='auto')
+print('    Fetching ' + stt_windows.WHISPER_MODEL + ' ...')
+WhisperModel(stt_windows.WHISPER_MODEL, device='auto', compute_type='auto')
 print('    Speech model ready.')
 "@
 if ($LASTEXITCODE -ne 0) {

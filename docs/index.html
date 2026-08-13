@@ -31,7 +31,6 @@
     --surface: var(--bone);
     --fg: var(--ink);
     --muted: #7A6152;
-    --accent: var(--salmon);
     --accent-fg: #2A100A;
     --rule: var(--line);
     --keycap-face: #FBF7F1;
@@ -60,7 +59,6 @@
   }
 
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
   body {
     margin: 0;
     background: var(--bg);
@@ -485,7 +483,6 @@ function selectOS(os) {
   document.getElementById('install-notice').innerHTML = data.notice.map(n => `<li>${n}</li>`).join('');
   document.getElementById('install-walkthrough').innerHTML = data.walkthrough.map(s => `<li>${s}</li>`).join('');
   document.querySelectorAll('.os-tab').forEach(b => b.classList.toggle('active', b.dataset.os === os));
-  currentOS = os;
 }
 
 function copyInstall() {
@@ -499,8 +496,7 @@ function copyInstall() {
   });
 }
 
-let currentOS = /Win/i.test(navigator.userAgent) ? 'windows' : 'mac';
-selectOS(currentOS);
+selectOS(/Win/i.test(navigator.userAgent) ? 'windows' : 'mac');
 
 /* The hero demo: press the key, watch the pill listen, watch the words land.
    It is the whole product in one gesture, so it is the only animation on the
