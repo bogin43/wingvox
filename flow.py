@@ -664,11 +664,10 @@ def warm_up_llm():
 
 _kb = keyboard.Controller()
 
-# Serializes the whole set-clipboard / paste / restore-clipboard sequence.
-# Two dictations finishing close together would otherwise interleave: the
-# second one's clipboard write can land between the first's paste and its
-# restore, so the first pastes the second's text (or the restore clobbers
-# text that hasn't been pasted yet).
+# Guards every clipboard write, both the one before the paste keystroke and
+# the deferred restore afterwards. Two dictations finishing close together
+# would otherwise interleave: the second one's write can land between the
+# first's paste and its restore, so the first pastes the second's text.
 _inject_lock = threading.Lock()
 
 # How long to wait after sending the paste keystroke before putting the
@@ -796,14 +795,28 @@ def run():
 
     def _release_watchdog():
         # pynput's low-level hook has been observed to silently drop
-        # on_release for Right Alt/AltGr on some Windows setups (seen under
-        # UTM VM keyboard passthrough) -- the press fires, the release
-        # never does, leaving the overlay stuck on "Recording" forever.
-        # Poll the actual hardware key state as a backstop so a missed
-        # hook callback can never wedge a recording open indefinitely.
+        # on_release for the dictation key on some setups (seen under UTM VM
+        # keyboard passthrough) -- the press fires, the release never does,
+        # leaving the overlay stuck on "Recording" forever. Poll the actual
+        # hardware key state as a backstop so a missed hook callback can't
+        # wedge a recording open indefinitely.
+        #
+        # Wait until the key has actually been *seen* held before trusting a
+        # reading of "up". A platform whose key-state check doesn't work
+        # (returns False even mid-hold, which is what CGEventSourceKeyState
+        # does here on macOS) would otherwise end every recording ~150ms in,
+        # and every dictation comes back "Heard nothing". Requiring the
+        # down-reading first means a check that never reports the key held
+        # simply never fires the watchdog, which is the old behaviour rather
+        # than a broken one.
+        seen_down = False
         while state["recording"]:
             time.sleep(0.15)
-            if state["recording"] and not pc.is_hotkey_physically_down():
+            if not state["recording"]:
+                return
+            if pc.is_hotkey_physically_down():
+                seen_down = True
+            elif seen_down:
                 print("  [key] watchdog: physical key up, on_release never fired -- finishing recording")
                 _finish_recording("watchdog")
                 return
