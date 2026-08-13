@@ -16,5 +16,9 @@ setup(
     app=APP,
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
-    setup_requires=["py2app"],
+    # No setup_requires=["py2app"] on purpose. install.sh already installs
+    # py2app from requirements.txt, and declaring it here additionally makes
+    # setuptools print a deprecation banner (rows of "!!" and asterisks about
+    # fetch_build_eggs) in the middle of an otherwise calm install -- which
+    # reads as a crash to anyone who isn't a developer.
 )

@@ -139,7 +139,19 @@ fi
 # ---------- 9. Build the app ----------
 step "Building Wingvox.app"
 rm -rf "$REPO_DIR/build" "$REPO_DIR/dist" "$REPO_DIR/Wingvox.app"
-"$VENV_PY" setup.py py2app -A -q
+# py2app narrates every file it copies and signs even under -q, which buries
+# the installer's own progress in pages of internal paths. Hold it all back
+# and only surface it if the build actually fails, where it's the first
+# thing anyone would need.
+BUILD_LOG="$(mktemp)"
+if ! "$VENV_PY" setup.py py2app -A -q >"$BUILD_LOG" 2>&1; then
+    echo "    Build failed — full output follows." >&2
+    echo >&2
+    cat "$BUILD_LOG" >&2
+    rm -f "$BUILD_LOG"
+    exit 1
+fi
+rm -f "$BUILD_LOG"
 mv dist/Wingvox.app "$REPO_DIR/Wingvox.app"
 rm -rf "$REPO_DIR/build" "$REPO_DIR/dist"
 echo "    Built $REPO_DIR/Wingvox.app"
