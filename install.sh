@@ -169,13 +169,16 @@ echo
 echo "One more thing — macOS needs your permission for Wingvox to work."
 echo "This can't be done from a script; it needs a few clicks in System Settings."
 echo
-echo "Look for \"Wingvox\" in each of these lists:"
+echo "Turn \"Wingvox\" on in both of these:"
 echo "  System Settings > Privacy & Security > Microphone"
 echo "  System Settings > Privacy & Security > Accessibility"
-echo "  System Settings > Privacy & Security > Input Monitoring"
 echo
 echo "If it isn't listed, click +, press Cmd+Shift+G, and paste:"
 echo "  $REPO_DIR/Wingvox.app"
+echo
+echo "(Accessibility also covers Input Monitoring, so there's usually"
+echo "nothing to do there. If the hotkey does nothing at all, check that"
+echo "list too.)"
 echo
 echo "Opening the setup guide now..."
 # Render SETUP.md to HTML first -- opening the .md directly hands a raw

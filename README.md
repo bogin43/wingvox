@@ -131,10 +131,15 @@ Handled automatically by the installer:
 
 ## macOS permissions
 
-System Settings > Privacy & Security: grant **Microphone**, **Accessibility**, and
-**Input Monitoring** to **Wingvox**. If dictation silently does nothing, or the
-hotkey works but paste doesn't land, this is why. If it isn't listed, add it with
-`+` > Cmd+Shift+G > `~/wingvox/Wingvox.app`.
+System Settings > Privacy & Security: grant **Microphone** and **Accessibility**
+to **Wingvox**. If dictation silently does nothing, or the hotkey works but paste
+doesn't land, this is why. If it isn't listed, add it with `+` > Cmd+Shift+G >
+`~/wingvox/Wingvox.app`.
+
+**Input Monitoring** is also required for the hotkey, but Accessibility normally
+satisfies it — an Accessibility-trusted app is allowed to listen for key presses,
+and Wingvox won't appear in that list at all. Only grant it explicitly if the
+hotkey produces no response whatsoever.
 
 macOS attributes these to the `Wingvox.app` bundle the LaunchAgent runs, not to
 the Python interpreter inside it — so there's nothing to re-grant when Homebrew

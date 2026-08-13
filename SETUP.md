@@ -34,16 +34,15 @@ app you're using.
 Skip this and you'll see "Accessibility access not granted — hotkey & paste
 won't work" the first time Wingvox starts.
 
-### 3. Input Monitoring
+### 3. Input Monitoring — usually nothing to do
 
-A separate permission (as of recent macOS versions) also required for the
-global hotkey to work at all.
+The global hotkey needs this, but granting Accessibility above normally
+satisfies it too: macOS treats an Accessibility-trusted app as allowed to
+listen for key presses, and Wingvox won't even appear in this list.
 
-1. Open **System Settings > Privacy & Security > Input Monitoring**
-2. Same as above — find **Wingvox**, toggle it **on**
-
-Skip this and pressing the hotkey will do nothing at all — no error, no
-overlay, just silence.
+Only if pressing the hotkey does nothing at all — no pill, no sound, no
+error — open **System Settings > Privacy & Security > Input Monitoring**
+and turn **Wingvox** on there as well (adding it with **+** if needed).
 
 **If Wingvox isn't listed** in one of them, click **+**, press
 **Cmd+Shift+G**, and paste `~/wingvox/Wingvox.app` (the exact path is
