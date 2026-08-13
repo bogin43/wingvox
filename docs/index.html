@@ -135,6 +135,37 @@
     margin-bottom: 8px;
   }
 
+  .walkthrough {
+    counter-reset: wv;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .walkthrough li {
+    position: relative;
+    counter-increment: wv;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px 14px 52px;
+    margin-bottom: 10px;
+    font-size: 0.94rem;
+  }
+  .walkthrough li::before {
+    content: counter(wv);
+    position: absolute;
+    left: 16px;
+    top: 14px;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-align: center;
+    line-height: 24px;
+  }
+
   .notice {
     background: var(--warn-bg);
     border: 1px solid var(--warn-border);
@@ -178,6 +209,16 @@
   </section>
 
   <section>
+    <h2>What happens after you paste it</h2>
+    <ol class="walkthrough" id="install-walkthrough"></ol>
+    <!-- Drop a screen recording of a real install in here when you have one.
+         Watching it work once removes most of the hesitation about pasting a
+         command into a terminal:
+         <video src="install-demo.mp4" controls muted playsinline
+                style="width:100%;border-radius:10px;border:1px solid var(--border);margin-top:20px"></video> -->
+  </section>
+
+  <section>
     <h2>How it works</h2>
     <div class="steps">
       <div class="step"><span class="num">1</span><br>Hold your hotkey and speak</div>
@@ -207,17 +248,33 @@
 <script>
 const OS_DATA = {
   mac: {
-    cmd: 'curl -fsSL https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.sh | bash',
-    requirement: 'Requires an Apple Silicon Mac (M1/M2/M3/M4). Paste this into Terminal — it sets up everything needed and takes a few minutes.',
+    cmd: 'curl -fsSL https://bogin43.github.io/wingvox/mac | bash',
+    requirement: 'Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal (press ⌘ + Space, type "terminal", hit Return), paste this, and press Return.',
+    // Written to be read *before* starting, so nothing during the install is
+    // a surprise. The password step and the invisible typing are where
+    // people stop and assume something has gone wrong.
+    walkthrough: [
+      'It asks for your Mac password. This is Homebrew, which Wingvox needs to install. <strong>Nothing appears as you type</strong> &mdash; no dots, no cursor movement. That is normal. Type it and press Return.',
+      'It downloads about 3.5GB of speech and language models. Expect 10&ndash;30 minutes depending on your connection. You can leave it running.',
+      'A microphone request appears. Click <strong>Allow</strong>.',
+      'An Accessibility request appears. Click <strong>Open System Settings</strong>, then switch <strong>Wingvox</strong> on. It restarts itself once you do.',
+      'Hold <strong>Right Option</strong>, say something, let go. Your words appear wherever your cursor is.'
+    ],
     notice: [
-      'It requests <strong>Microphone</strong>, <strong>Accessibility</strong>, and <strong>Input Monitoring</strong> permissions &mdash; needed to capture audio and paste text into other apps.',
+      'It requests <strong>Microphone</strong> and <strong>Accessibility</strong> permissions &mdash; needed to hear you and to paste text into other apps.',
       'It installs Homebrew, Xcode Command Line Tools, and Ollama if they’re missing on your Mac.',
       'Since all transcription and text cleanup happens locally, no audio or text is sent anywhere, meaning it’s all private.'
     ]
   },
   windows: {
-    cmd: 'irm https://raw.githubusercontent.com/bogin43/wingvox/main/bootstrap.ps1 | iex',
-    requirement: 'Requires Windows 10/11 with winget. Paste this into PowerShell — it sets up everything needed and takes a few minutes.',
+    cmd: 'irm https://bogin43.github.io/wingvox/windows | iex',
+    requirement: 'Requires Windows 10/11 with winget. Open PowerShell (press Start, type "powershell", hit Enter), paste this, and press Enter.',
+    walkthrough: [
+      'It downloads about 3.5GB of speech and language models. Expect 10&ndash;30 minutes depending on your connection. You can leave it running.',
+      'Windows may show <strong>“Windows protected your PC”</strong>. Click <strong>More info</strong>, then <strong>Run anyway</strong>. This appears because the app isn’t code-signed yet, not because anything is wrong.',
+      'Allow microphone access if Windows asks.',
+      'Hold <strong>Right Alt</strong>, say something, let go. Your words appear wherever your cursor is.'
+    ],
     notice: [
       'It requests <strong>Microphone</strong> access &mdash; needed to capture audio.',
       'The first launch shows a SmartScreen warning since this build isn’t code-signed yet &mdash; click "More info" then "Run anyway".',
@@ -233,6 +290,8 @@ function selectOS(os) {
   document.getElementById('install-cmd').textContent = data.cmd;
   document.getElementById('install-requirement').textContent = data.requirement;
   document.getElementById('install-notice').innerHTML = data.notice.map(n => `<li>${n}</li>`).join('');
+  document.getElementById('install-walkthrough').innerHTML =
+    data.walkthrough.map(s => `<li>${s}</li>`).join('');
   document.querySelectorAll('.os-tab').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.os === os);
   });
