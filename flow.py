@@ -245,7 +245,7 @@ def ensure_microphone_access(timeout=30) -> bool:
         print(f"  ⚠ AVFoundation unavailable ({e}); skipping explicit mic "
               f"permission request — sounddevice will still prompt on first use.",
               file=sys.stderr)
-        return True  # fail open, same spirit as ensure_accessibility_access()
+        return True  # fail open, same spirit as mac_permission_flow()
     status = AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
     if status == 3:  # AVAuthorizationStatusAuthorized
         return True
@@ -263,25 +263,50 @@ def ensure_microphone_access(timeout=30) -> bool:
     return granted["value"]
 
 
-def ensure_accessibility_access() -> bool:
-    """The global hotkey listener and the simulated Cmd+V paste both silently
-    depend on Accessibility trust. Unlike the mic check, AXIsProcessTrusted()
-    doesn't trigger a system prompt — it can only report whether trust has
-    already been granted manually in System Settings."""
+def mac_permission_flow(status) -> None:
+    """Ask macOS for anything still missing, then get out of the user's way.
+
+    The global hotkey and the simulated Cmd+V both depend on Accessibility
+    trust. Previously Wingvox only *checked* for it and printed a paragraph
+    telling the user where to click; this prompts instead, and — the part
+    that actually matters — notices when the toggle is flipped and restarts
+    so the new trust takes effect. Accessibility is evaluated once at
+    process start, so without the restart the user grants permission,
+    nothing changes, and it looks broken.
+
+    There is no Windows analogue of this gate: pynput's global low-level
+    keyboard hook works for a normal-privilege interactive process with no
+    manifest or elevation. Two Windows caveats no code can detect or fix —
+    AV/EDR products flagging global keyboard hooks, and UIPI blocking the
+    simulated paste into elevated windows — are covered in SETUP.md.
+    """
     if not pc.IS_MAC:
-        # No Windows analogue of macOS's AX/TCC trust gate — pynput's
-        # global low-level keyboard hook works for a normal-privilege
-        # interactive process with no manifest/elevation needed. Two real
-        # caveats that no code can detect or fix: some AV/EDR products flag
-        # global keyboard hooks as suspicious, and Windows' UIPI blocks the
-        # simulated paste from reaching any window running elevated (Task
-        # Manager, an admin terminal) — see SETUP.md.
-        return True
-    try:
-        import HIServices
-        return bool(HIServices.AXIsProcessTrusted())
-    except Exception:
-        return True  # can't determine — fail open rather than false-alarm
+        return
+
+    if pc.has_accessibility_access():
+        # Accessibility normally covers Input Monitoring too, so this only
+        # fires on a machine where that doesn't hold. Cheap insurance
+        # against a hotkey that silently does nothing.
+        if not pc.has_input_monitoring():
+            status("Wingvox needs Input Monitoring to see the hotkey — "
+                   "approve the dialog", "orange", hide_after=10)
+            pc.request_input_monitoring()
+        return
+
+    status("Wingvox needs Accessibility permission — turn it on in the "
+           "window that just opened", "orange")
+    pc.request_accessibility_access()
+
+    def _wait_for_grant():
+        for _ in range(900):  # give up after ~15 minutes
+            time.sleep(1)
+            if pc.has_accessibility_access():
+                status("✓ Permission granted — restarting Wingvox…", "green")
+                time.sleep(2)  # let the message be readable before we go
+                pc.restart_self()
+                return
+
+    threading.Thread(target=_wait_for_grant, daemon=True).start()
 
 
 def _resample(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray:
@@ -738,10 +763,7 @@ def run():
         if overlay:
             overlay.show(text, color, hide_after=hide_after)
 
-    if not ensure_accessibility_access():
-        status("⚠ Accessibility access not granted — hotkey & paste won't work. "
-               "Enable Wingvox in System Settings > Privacy & Security > "
-               "Accessibility, then restart.", "orange")
+    mac_permission_flow(status)
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
     state = {"recording": False, "warm": False}
@@ -946,7 +968,7 @@ def run():
     print(f"Hold {HOTKEY_LABEL.upper()} to dictate into any app. Ctrl+C here to quit.")
     if pc.IS_MAC:
         print("If nothing happens: System Settings > Privacy & Security >")
-        print("  grant your terminal app Microphone, Accessibility, and Input Monitoring.")
+        print("  turn Wingvox on under Microphone and Accessibility.")
     else:
         print("If nothing happens: check Settings > Privacy & security > Microphone,")
         print("  and make sure no antivirus/EDR software is blocking the global hotkey.")

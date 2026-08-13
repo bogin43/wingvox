@@ -64,6 +64,86 @@ else:
         return False
 
 
+# ---------- macOS permissions ----------
+
+# The LaunchAgent's label, used to restart ourselves through launchd once a
+# permission is granted. Must match com.broganwilliams.wingvox.plist.template.
+LAUNCH_AGENT_LABEL = "com.broganwilliams.wingvox"
+
+
+def has_accessibility_access() -> bool:
+    """Whether Accessibility is already granted. Never prompts."""
+    if not IS_MAC:
+        return True
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return True  # can't determine -- fail open rather than false-alarm
+
+
+def request_accessibility_access() -> bool:
+    """Same check, but shows the system prompt when not yet trusted.
+
+    Unlike Microphone (where AVFoundation's dialog has an Allow button that
+    grants access outright), Apple deliberately gives Accessibility no
+    inline approval: the dialog only offers "Open System Settings", and the
+    user has to flip the toggle themselves. What this buys is that macOS
+    pre-adds Wingvox to the list already, so they flip a switch instead of
+    hunting for the app with + and Cmd+Shift+G."""
+    if not IS_MAC:
+        return True
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt,
+        )
+        return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+    except Exception:
+        return True
+
+
+def has_input_monitoring() -> bool:
+    """Whether we're allowed to listen for key presses.
+
+    Normally true purely as a consequence of Accessibility being granted --
+    macOS treats an Accessibility-trusted app as allowed to listen, and
+    Wingvox won't even appear in the Input Monitoring list. Checked
+    separately anyway so the rare machine where that doesn't hold gets a
+    prompt instead of a hotkey that silently does nothing."""
+    if not IS_MAC:
+        return True
+    try:
+        from Quartz import CGPreflightListenEventAccess
+        return bool(CGPreflightListenEventAccess())
+    except Exception:
+        return True
+
+
+def request_input_monitoring() -> None:
+    if not IS_MAC:
+        return
+    try:
+        from Quartz import CGRequestListenEventAccess
+        CGRequestListenEventAccess()
+    except Exception:
+        pass
+
+
+def restart_self() -> None:
+    """Restart Wingvox through launchd.
+
+    Accessibility trust is decided when the process starts, so a grant made
+    while Wingvox is running doesn't take effect until it restarts. Without
+    this the user flips the toggle, nothing happens, and it looks broken --
+    the single most common way this setup goes wrong."""
+    if not IS_MAC:
+        return
+    subprocess.Popen(
+        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 # ---------- clipboard ----------
 
 def clipboard_get():
