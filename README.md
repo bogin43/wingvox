@@ -22,7 +22,9 @@ qwen2.5:3b cleanup -> clipboard + paste.
 
 ### Mac
 
-Requires an Apple Silicon Mac (M1/M2/M3/M4). Open Terminal and run:
+Requires an Apple Silicon Mac (M1/M2/M3/M4) running macOS 14 Sonoma or newer.
+Intel Macs aren't supported: the speech engine (mlx) is Apple Silicon only.
+Open Terminal and run:
 
 ```bash
 curl -fsSL https://bogin43.github.io/wingvox/mac | bash
@@ -56,6 +58,11 @@ any time to add it.
 
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.
+
+To remove it, run `./uninstall.sh` from the Wingvox folder. It stops Wingvox,
+removes the login service and the built app, and asks before touching your
+glossary. Homebrew, Python, Ollama and the models are left alone, with the
+commands to remove those printed at the end if you want them gone too.
 
 ### Windows
 

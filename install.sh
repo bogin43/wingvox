@@ -11,6 +11,21 @@ cd "$REPO_DIR"
 
 step() { echo; echo "==> $1"; }
 
+# The cleanup-model download runs in the background from step 5 onward. If
+# the install dies before step 9b collects it (a failed build, a Ctrl-C),
+# don't leave a detached multi-gigabyte download running with nothing left
+# to report to.
+cleanup_bg() {
+    if [[ -n "${PULL_PID:-}" ]] && kill -0 "$PULL_PID" 2>/dev/null; then
+        kill "$PULL_PID" 2>/dev/null || true
+        # Reap it, or bash prints its own "Terminated: 15" line on the way
+        # out and the real error scrolls off behind job-control noise.
+        wait "$PULL_PID" 2>/dev/null || true
+    fi
+    rm -f "${PULL_LOG:-}" 2>/dev/null || true
+}
+trap cleanup_bg EXIT
+
 step "Installing Wingvox from: $REPO_DIR"
 echo "    This location is now permanent — the app and its background"
 echo "    service both reference this exact folder path. Don't move it"
@@ -25,6 +40,25 @@ if [[ "$(uname -m)" != "arm64" ]]; then
     exit 1
 fi
 echo "    OK — Apple Silicon detected."
+
+# ---------- 1b. macOS version ----------
+# mlx publishes arm64 wheels tagged macosx_14_0 and up. On macOS 13 (Ventura)
+# and older, pip doesn't fail -- it quietly walks back to mlx 0.29.3, the last
+# release with a 13.0 wheel, which current mlx-whisper is not built against.
+# The install then "succeeds" and Wingvox breaks at the first dictation, deep
+# inside a model load, with an error nobody could trace back to their macOS
+# version. Check it here where the message can say what's actually wrong.
+step "Checking macOS version"
+MACOS_VER="$(sw_vers -productVersion)"
+MACOS_MAJOR="${MACOS_VER%%.*}"
+if [[ "$MACOS_MAJOR" -lt 14 ]]; then
+    echo "Wingvox needs macOS 14 (Sonoma) or newer. This Mac is on $MACOS_VER." >&2
+    echo >&2
+    echo "The speech engine (mlx) publishes no build for this version of macOS." >&2
+    echo "Updating in System Settings > General > Software Update is the only fix." >&2
+    exit 1
+fi
+echo "    OK — macOS $MACOS_VER."
 
 # ---------- 2. Xcode Command Line Tools ----------
 step "Checking for Xcode Command Line Tools"
@@ -52,8 +86,10 @@ if ! xcode-select -p &>/dev/null; then
         echo "  $REPO_DIR/install.sh" >&2
         exit 1
     fi
+    echo "    OK — Command Line Tools installed."
+else
+    echo "    OK — already installed."
 fi
-echo "    OK — already installed."
 
 # ---------- 3. Homebrew ----------
 step "Checking for Homebrew"
@@ -66,11 +102,24 @@ if ! command -v brew &>/dev/null; then
 fi
 echo "    OK — Homebrew available at $(command -v brew)."
 
-# ---------- 4. python@3.12 ----------
-step "Checking for python@3.12"
-brew list python@3.12 &>/dev/null || brew install python@3.12
+# ---------- 4. python@3.12 and Ollama ----------
+# Both come from Homebrew and neither depends on the other, so they go in a
+# single brew call: one dependency-resolution pass instead of two, and brew
+# fetches the bottles concurrently.
+step "Checking for python@3.12 and Ollama"
+BREW_WANTED=()
+brew list python@3.12 &>/dev/null || BREW_WANTED+=(python@3.12)
+if [[ "${WINGVOX_LITE:-}" != "1" ]]; then
+    brew list ollama &>/dev/null || BREW_WANTED+=(ollama)
+fi
+if [[ ${#BREW_WANTED[@]} -gt 0 ]]; then
+    echo "    Installing: ${BREW_WANTED[*]}"
+    brew install "${BREW_WANTED[@]}"
+else
+    echo "    OK — both already installed."
+fi
 PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
-echo "    OK — using $PYTHON_BIN"
+echo "    Using $PYTHON_BIN"
 
 # ---------- 5 & 6. Ollama and the cleanup model ----------
 # WINGVOX_LITE=1 skips both. The cleanup model is 1.8GB of the ~2.6GB
@@ -84,8 +133,7 @@ if [[ "${WINGVOX_LITE:-}" == "1" ]]; then
     echo "    Dictation will paste raw transcripts, without the cleanup pass."
     echo "    To add it later, re-run this installer without WINGVOX_LITE."
 else
-    step "Checking for Ollama"
-    brew list ollama &>/dev/null || brew install ollama
+    step "Starting Ollama"
     brew services start ollama &>/dev/null || true
     echo -n "    Waiting for Ollama to come up"
     for i in $(seq 1 20); do
@@ -103,8 +151,17 @@ else
         fi
     done
 
-    step "Pulling the qwen2.5:3b cleanup model (this may take a while on first run)"
-    ollama pull qwen2.5:3b
+    # The 1.8GB cleanup model is the longest single step in the install and
+    # nothing between here and the LaunchAgent needs it, so it runs in the
+    # background while the venv, the Whisper download and the app build all
+    # proceed. Collected at step 9b below. Output goes to a log rather than
+    # the terminal: two progress bars writing to the same screen is a mess,
+    # and the failure text is more useful shown in one piece at the end.
+    step "Pulling the qwen2.5:3b cleanup model in the background (1.8GB)"
+    PULL_LOG="$(mktemp)"
+    ollama pull qwen2.5:3b >"$PULL_LOG" 2>&1 &
+    PULL_PID=$!
+    echo "    Started — the rest of the install continues while it downloads."
 fi
 
 # ---------- 7. Python virtual environment ----------
@@ -120,20 +177,28 @@ VENV_PY="$REPO_DIR/venv/bin/python"
 step "Installing Python dependencies"
 "$VENV_PY" -m pip install --upgrade pip -q
 "$VENV_PY" -m pip install -r requirements.txt -q
-# sympy/networkx/pillow arrive as torch's dependencies and stay behind once
-# torch is removed -- pip reports no Required-by for any of them, and
-# nothing in Wingvox imports them. ~103MB for packages that never load.
-echo "    Removing unused transitive dependencies (torch/numba/scipy/llvmlite)…"
+# mlx-whisper on its own, with --no-deps. Its declared dependencies include
+# torch, llvmlite, scipy, numba, sympy and networkx: ~176MB that nothing in
+# Wingvox's code path imports (see the note in requirements.txt). This used
+# to be a plain install followed by `pip uninstall torch numba scipy ...`,
+# which downloaded and unpacked all of it before throwing it away. The real
+# dependencies are pinned in requirements.txt above, so this only adds
+# mlx_whisper itself.
+#
+# Older installs still have the discarded packages sitting in their venv
+# from that earlier approach, so clear them out once on upgrade.
+echo "    Installing mlx-whisper (without its unused torch/scipy deps)…"
+"$VENV_PY" -m pip install --no-deps mlx-whisper -q
 "$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite sympy networkx pillow -q 2>/dev/null || true
 
 # ---------- 7b. Pre-download the Whisper model ----------
 # mlx-whisper fetches its weights lazily on first use, so without this the
-# ~1.5GB download happens on the first launch instead -- after the install
+# ~450MB download happens on the first launch instead -- after the install
 # has already reported success. Wingvox then sits on "Loading speech model…"
 # for minutes with no progress shown anywhere, and any dictation attempted
 # meanwhile blocks behind it. Reads as a broken install. Pull it here, where
 # the wait is expected.
-step "Downloading the speech model (about 1.5GB, one time)"
+step "Downloading the speech model (about 450MB, one time)"
 if ! "$VENV_PY" -c "import stt_mac; from huggingface_hub import snapshot_download; snapshot_download(repo_id=stt_mac.WHISPER_REPO)"; then
     echo "    WARNING: couldn't pre-download the speech model."
     echo "    Not fatal — Wingvox fetches it on first launch instead, but the"
@@ -169,6 +234,28 @@ rm -f "$BUILD_LOG"
 mv dist/Wingvox.app "$REPO_DIR/Wingvox.app"
 rm -rf "$REPO_DIR/build" "$REPO_DIR/dist"
 echo "    Built $REPO_DIR/Wingvox.app"
+
+# ---------- 9b. Collect the background model pull ----------
+# Everything above this point overlapped the download. Wait for it here, so
+# Wingvox starts with the cleanup model already in place rather than warning
+# about a missing model for the first few minutes of its life.
+if [[ -n "${PULL_PID:-}" ]]; then
+    step "Finishing the cleanup model download"
+    echo "    Waiting for qwen2.5:3b (already running since the start of the install)…"
+    if wait "$PULL_PID"; then
+        echo "    OK — cleanup model ready."
+    else
+        echo "    WARNING: the cleanup model didn't download. Output follows." >&2
+        echo >&2
+        cat "$PULL_LOG" >&2
+        echo >&2
+        echo "    Not fatal: dictation still works, it just pastes raw" >&2
+        echo "    transcripts without the cleanup pass. To fix it later:" >&2
+        echo "      ollama pull qwen2.5:3b" >&2
+    fi
+    rm -f "$PULL_LOG"
+    PULL_PID=""
+fi
 
 # ---------- 10. LaunchAgent ----------
 step "Installing the background service"

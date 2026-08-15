@@ -2,10 +2,31 @@
 sounddevice
 pynput
 requests
+numpy
 
 # ---------- macOS ----------
 
-mlx-whisper; sys_platform == "darwin"
+# mlx-whisper itself is NOT listed here: install.sh installs it separately
+# with --no-deps, because its declared dependency set drags in torch
+# (106MB), llvmlite (39MB), scipy (19MB), numba, sympy and networkx --
+# ~176MB that stt_mac.py's code path never touches. torch is never imported
+# at all, and numba/scipy are only reached by mlx_whisper's unused
+# word-timestamps feature, which flow.py fakes out with sys.modules stubs
+# (flow.py:36). The installer used to download all of it and then uninstall
+# it again on every single install.
+#
+# The lines below are mlx-whisper's remaining, genuinely-needed
+# dependencies, spelled out because --no-deps means pip won't resolve them.
+# If a future mlx-whisper release imports something new, it fails loudly
+# with an ImportError rather than silently degrading.
+#
+# Installing by hand? Use:
+#   pip install -r requirements.txt && pip install --no-deps mlx-whisper
+mlx; sys_platform == "darwin"
+more-itertools; sys_platform == "darwin"
+tiktoken; sys_platform == "darwin"
+tqdm; sys_platform == "darwin"
+huggingface_hub; sys_platform == "darwin"
 
 # Needed to build Wingvox.app (setup.py's py2app step). Installed explicitly
 # here rather than relying on setuptools' `setup_requires` auto-fetch, which
@@ -26,17 +47,6 @@ pyobjc-framework-AVFoundation==12.2.1; sys_platform == "darwin"
 pyobjc-framework-CoreAudio==12.2.1; sys_platform == "darwin"
 pyobjc-framework-CoreMedia==12.2.1; sys_platform == "darwin"
 pyobjc-framework-CoreText==12.2.1; sys_platform == "darwin"
-
-# install.sh runs the following automatically after the above — documented
-# here for anyone installing manually with `pip install -r requirements.txt`:
-#   pip uninstall -y torch numba scipy llvmlite
-# mlx-whisper declares these as dependencies but stt_mac.py's code path never
-# needs them: torch is never imported at all, and numba/scipy/llvmlite are
-# only pulled in by mlx_whisper's unused word-timestamps feature (see the
-# sys.modules stub near the top of flow.py, which fakes just enough of
-# numba/scipy for that import to succeed without installing the real ~250MB
-# packages). If a future mlx-whisper update changes timing.py's imports,
-# this stub may need updating — it'll fail loudly (ImportError) if so.
 
 # ---------- Windows ----------
 
