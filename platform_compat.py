@@ -255,6 +255,68 @@ def data_dir() -> Path:
     return Path(__file__).parent
 
 
+# ---------- update check ----------
+
+def install_dir() -> Path:
+    """The git checkout Wingvox runs from. Distinct from data_dir(): on
+    Windows those are different places, and the update check has to look at
+    the checkout, not at %LOCALAPPDATA%."""
+    return Path(__file__).resolve().parent
+
+
+def _git(*args, timeout=10):
+    """Run git in the install directory. Returns stripped stdout, or None on
+    any failure at all -- git missing, not a checkout, no network, timeout.
+    The update check is a nicety; it must never be a reason the app is
+    slower to start or noisier in the log."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(install_dir()), *args],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def update_command() -> str:
+    """The one line a user runs to take an update. Kept here so the pill,
+    the log and the docs can't drift apart."""
+    if IS_MAC:
+        return (f"cd {install_dir()} && git pull && "
+                f"launchctl kickstart -k gui/$(id -u)/{LAUNCH_AGENT_LABEL}")
+    return (f"cd {install_dir()} && git pull, then run wingvox-off.cmd "
+            "followed by wingvox-on.cmd")
+
+
+def check_for_update():
+    """Is a newer commit published than the one running?
+
+    Returns True (behind), False (current), or None (couldn't tell).
+
+    Read-only on purpose: `git ls-remote` asks the remote for its ref without
+    writing anything into the user's checkout, so this can't create a dirty
+    tree, a detached head, or a surprise merge. Deciding "behind" by SHA
+    inequality alone would be wrong on the development machine, where local
+    is *ahead* of the remote -- so the remote SHA is only treated as an
+    update when the local repository has never seen that commit.
+    """
+    local = _git("rev-parse", "HEAD")
+    if not local:
+        return None
+    remote_line = _git("ls-remote", "origin", "HEAD", timeout=15)
+    if not remote_line:
+        return None
+    remote = remote_line.split()[0]
+    if remote == local:
+        return False
+    # `git cat-file -e` succeeds only if this repo already has that object.
+    have_it = _git("cat-file", "-e", f"{remote}^{{commit}}")
+    return have_it is None
+
+
 # ---------- Windows: clear any stuck modifier before a simulated paste ----------
 
 def release_all_modifiers(kb) -> None:

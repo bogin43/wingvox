@@ -9,6 +9,7 @@ Usage:
   python flow.py test-clean "some messy text"   run the Ollama cleanup step
   python flow.py test-inject "hello"            paste text into focused app in 3s
   python flow.py add-correction "wrong text" "right text"   fix a recurring mis-transcription
+  python flow.py check-update  see whether a newer version has been published
 """
 
 import os
@@ -21,6 +22,7 @@ import time
 import types
 from pathlib import Path
 
+import notice
 import platform_compat as pc
 
 if pc.IS_MAC and platform.machine() != "arm64":
@@ -780,6 +782,12 @@ def run():
 
     mac_permission_flow(status)
 
+    # Before the hotkey listener exists, so "must acknowledge before use" is
+    # enforced by there being nothing to press yet rather than by a flag some
+    # other code path could forget to check.
+    if not notice.check(status):
+        sys.exit(0)
+
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
     state = {"recording": False, "warm": False}
     finish_lock = threading.Lock()
@@ -987,7 +995,37 @@ def run():
     # fixing later, it needs the recording start/stop logic run from
     # *inside* the filter itself (before raising suppress_event), not a
     # separate on_press/on_release pair.
-    threading.Thread(target=warm_up, daemon=True).start()
+    warm_done = threading.Event()
+
+    def _warm_up_then_signal():
+        # warm_up() has several early returns; the event has to be set on all
+        # of them or the update check below waits out its timeout for nothing.
+        try:
+            warm_up()
+        finally:
+            warm_done.set()
+
+    def _update_check():
+        # Deliberately last and deliberately quiet. It waits for warm-up so
+        # its pill doesn't stomp on "Ready", it never blocks startup, and a
+        # failure (offline, no git, someone's own fork) is a log line rather
+        # than anything the user sees. Wingvox does not install the update
+        # itself -- pulling code onto someone's machine without them asking
+        # is not a thing this app does.
+        warm_done.wait(180)
+        time.sleep(5)  # let the "Ready" pill finish its own hide_after
+        behind = pc.check_for_update()
+        if behind:
+            print(f"  Update available — run: {pc.update_command()}")
+            status("Update available — run ./update.sh in the Wingvox folder",
+                   "orange", hide_after=12)
+        elif behind is False:
+            print("  Up to date.")
+        else:
+            print("  Update check skipped (no network, or not a git checkout).")
+
+    threading.Thread(target=_warm_up_then_signal, daemon=True).start()
+    threading.Thread(target=_update_check, daemon=True).start()
     listener = keyboard.Listener(
         on_press=_guarded("on_press", on_press),
         on_release=_guarded("on_release", on_release),
@@ -1058,6 +1096,17 @@ def cmd_test_inject(text: str):
     print("Done - check the focused field.")
 
 
+def cmd_check_update():
+    behind = pc.check_for_update()
+    if behind is None:
+        print("Couldn't check — no network, git missing, or this isn't a git checkout.")
+    elif behind:
+        print("An update is available. To take it:")
+        print(f"  {pc.update_command()}")
+    else:
+        print("Wingvox is up to date.")
+
+
 def cmd_add_correction(wrong: str, right: str):
     if not wrong or not right:
         print('Usage: flow.py add-correction "wrong text" "right text"')
@@ -1077,6 +1126,8 @@ if __name__ == "__main__":
         cmd_test_clean(args[1] if len(args) > 1 else "um so like this is uh a test you know")
     elif args[0] == "test-inject":
         cmd_test_inject(args[1] if len(args) > 1 else "Hello from Wingvox!")
+    elif args[0] == "check-update":
+        cmd_check_update()
     elif args[0] == "add-correction":
         cmd_add_correction(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
     else:

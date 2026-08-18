@@ -59,6 +59,9 @@ any time to add it.
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.
 
+To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
+you when there's something to take; it never installs anything on its own.
+
 To remove it, run `./uninstall.sh` from the Wingvox folder. It stops Wingvox,
 removes the login service and the built app, and asks before touching your
 glossary. Homebrew, Python, Ollama and the models are left alone, with the

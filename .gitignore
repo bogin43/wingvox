@@ -7,6 +7,8 @@ dictionary.txt
 corrections.txt
 wingvox.log
 wingvox.lock
+# Which NOTICE.md version this user has acknowledged -- per install
+notice_agreed
 # Generated from wingvox_task.xml.template by install.ps1 (has this
 # machine's absolute paths baked in) -- the template itself stays tracked.
 wingvox_task.xml

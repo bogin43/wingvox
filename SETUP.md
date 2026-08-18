@@ -177,6 +177,38 @@ settings > Environment Variables):
 `device`/`compute_type` are set to `"auto"`, so a CUDA GPU is used
 automatically if present; otherwise it falls back to CPU with int8 quantization.
 
+## Updates and notices
+
+Wingvox checks once at startup whether a newer version has been published. It
+asks GitHub a single question — "is there a newer commit?" — and sends nothing
+about you or about anything you've dictated. It never installs an update by
+itself.
+
+If there's one available, the status pill says so. To take it, on Mac:
+
+```bash
+cd ~/wingvox && ./update.sh
+```
+
+That shows you what changed, pulls it, and restarts Wingvox. Most updates need
+nothing else: the app runs `flow.py` straight out of that folder, so new code
+takes effect on restart. If an update also changes the Python dependencies or
+the speech model, `update.sh` says so and points you at the installer, since a
+restart alone can't pick those up.
+
+To check by hand at any time:
+
+```bash
+~/wingvox/venv/bin/python ~/wingvox/flow.py check-update
+```
+
+Occasionally an update carries something you should actually read — a change to
+what Wingvox does with your data, or behavior that works differently than
+before. Those appear as a dialog the first time you start the new version, and
+Wingvox waits for you to acknowledge it before it starts listening for the
+hotkey. It asks once per notice, not once per launch. The full text lives in
+`NOTICE.md` in the Wingvox folder if you want to re-read it later.
+
 ## Where to get help
 
 Ask in the Millionaire University community — mention you're using Wingvox
