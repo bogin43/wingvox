@@ -10,6 +10,7 @@ Usage:
   python flow.py test-inject "hello"            paste text into focused app in 3s
   python flow.py add-correction "wrong text" "right text"   fix a recurring mis-transcription
   python flow.py check-update  see whether a newer version has been published
+  python flow.py set-hotkey right|left   choose the Option key that starts dictation (Mac only)
 """
 
 import os
@@ -121,12 +122,18 @@ if pc.IS_MAC:
 OLLAMA_BASE = "http://127.0.0.1:11434"
 OLLAMA_URL = f"{OLLAMA_BASE}/api/chat"
 OLLAMA_MODEL = "qwen2.5:3b"
-HOTKEY_LABEL = "Right Option" if pc.IS_MAC else "Right Alt"
 # Always record from the built-in mic, not whatever the system default input is
 # (e.g. Bluetooth headphones, which often sound worse for dictation).
 # Override with WINGVOX_INPUT_DEVICE if you ever want a different mic.
+#
+# pc.mac_builtin_mic_name() asks CoreAudio which device is actually the
+# built-in one, so this covers every Mac model rather than one hardcoded
+# name that only matched a MacBook Air. Falls back to that name anyway if
+# AVFoundation can't answer -- still right on the machine most of this was
+# built and tested on, and resolve_input_device() below degrades to the
+# system default (with a warning) if even that doesn't match.
 PREFERRED_INPUT_DEVICE = os.environ.get("WINGVOX_INPUT_DEVICE") or (
-    "MacBook Air Microphone" if pc.IS_MAC else None
+    (pc.mac_builtin_mic_name() or "MacBook Air Microphone") if pc.IS_MAC else None
 )
 
 
@@ -147,6 +154,7 @@ def resolve_input_device(name_substring):
     return None
 DICT_PATH = pc.data_dir() / "dictionary.txt"
 CORRECTIONS_PATH = pc.data_dir() / "corrections.txt"
+HOTKEY_PATH = pc.data_dir() / "hotkey.txt"
 LOCK_PATH = pc.data_dir() / "wingvox.lock"
 LOG_PATH = pc.data_dir() / "wingvox.log"
 
@@ -192,6 +200,22 @@ def load_dictionary() -> str:
         terms = [t.strip() for t in DICT_PATH.read_text(encoding="utf-8").splitlines() if t.strip()]
         return ", ".join(terms)
     return ""
+
+
+def load_hotkey_choice() -> str:
+    """"right" or "left" -- which physical Option key starts dictation.
+    Windows ignores this; only Mac offers a choice today. Defaults to
+    "right", Wingvox's original hotkey, so a machine with no hotkey.txt at
+    all (every install before this feature existed) behaves exactly as it
+    always has."""
+    if not pc.IS_MAC or not HOTKEY_PATH.exists():
+        return "right"
+    choice = HOTKEY_PATH.read_text(encoding="utf-8").strip().lower()
+    return "left" if choice == "left" else "right"
+
+
+def save_hotkey_choice(choice: str) -> None:
+    HOTKEY_PATH.write_text(f"{choice}\n", encoding="utf-8")
 
 
 def load_corrections() -> list:
@@ -757,6 +781,17 @@ def run():
     print(f"  Wingvox {WINGVOX_VERSION} starting ({platform.system()})")
     dictionary = load_dictionary()
     corrections = load_corrections()
+    hotkey_choice = load_hotkey_choice()
+    if pc.IS_MAC:
+        HOTKEY_KEYS = pc.mac_hotkey_keys(hotkey_choice)
+        HOTKEY_LABEL = pc.MAC_HOTKEY_LABELS[hotkey_choice]
+        if hotkey_choice == "left":
+            print("  ⚠ Left Option is the dictation hotkey — Option+drag, Option+click "
+                  "and Option+Space (dictionary lookup) will start a recording instead "
+                  "while Wingvox is running.")
+    else:
+        HOTKEY_KEYS = pc.HOTKEY_KEYS
+        HOTKEY_LABEL = "Right Alt"
     print("  Requesting microphone access…")
     if not ensure_microphone_access():
         if pc.IS_MAC:
@@ -822,7 +857,7 @@ def run():
             time.sleep(0.15)
             if not state["recording"]:
                 return
-            if pc.is_hotkey_physically_down():
+            if pc.is_hotkey_physically_down(hotkey_choice):
                 seen_down = True
             elif seen_down:
                 print("  [key] watchdog: physical key up, on_release never fired -- finishing recording")
@@ -927,7 +962,7 @@ def run():
         print(f"  latency: stt {t1-t0:.2f}s + cleanup {t2-t1:.2f}s = {time.time()-t0:.2f}s")
 
     def on_press(key):
-        if key not in pc.HOTKEY_KEYS:
+        if key not in HOTKEY_KEYS:
             return
         if not state["recording"]:
             state["recording"] = True
@@ -952,7 +987,7 @@ def run():
         # win32_event_filter/suppress_event on the Listener itself.
 
     def on_release(key):
-        if key not in pc.HOTKEY_KEYS:
+        if key not in HOTKEY_KEYS:
             return
         _finish_recording("on_release")
 
@@ -1116,6 +1151,25 @@ def cmd_add_correction(wrong: str, right: str):
     print(f"Added: {wrong!r} -> {right!r}. Takes effect on next restart.")
 
 
+def cmd_set_hotkey(choice: str):
+    if not pc.IS_MAC:
+        print("The hotkey isn't user-selectable on Windows yet -- always Right Alt.")
+        return
+    choice = choice.strip().lower()
+    if choice not in ("right", "left"):
+        print('Usage: flow.py set-hotkey right|left')
+        print(f"Currently: {pc.MAC_HOTKEY_LABELS[load_hotkey_choice()]}")
+        return
+    save_hotkey_choice(choice)
+    print(f"Hotkey set to {pc.MAC_HOTKEY_LABELS[choice]}. Takes effect on next restart:")
+    print(f"  launchctl kickstart -k gui/$(id -u)/com.broganwilliams.wingvox")
+    if choice == "left":
+        print()
+        print("Note: Left Option prefixes several system shortcuts (Option+drag,")
+        print("Option+click, Option+Space for the dictionary lookup). Those will")
+        print("start a recording instead while Wingvox is running.")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
@@ -1128,6 +1182,8 @@ if __name__ == "__main__":
         cmd_test_inject(args[1] if len(args) > 1 else "Hello from Wingvox!")
     elif args[0] == "check-update":
         cmd_check_update()
+    elif args[0] == "set-hotkey":
+        cmd_set_hotkey(args[1] if len(args) > 1 else "")
     elif args[0] == "add-correction":
         cmd_add_correction(args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else "")
     else:

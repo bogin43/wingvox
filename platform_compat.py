@@ -29,25 +29,43 @@ if IS_WINDOWS and platform.machine().lower() in ("arm64", "aarch64"):
 # Cmd+V on Mac, Ctrl+V everywhere else.
 PASTE_MODIFIER = keyboard.Key.cmd if IS_MAC else keyboard.Key.ctrl
 
-# Physical Right Alt/Option. On non-US Windows keyboard layouts, pynput can
-# report the same physical key as alt_gr instead of alt_r depending on
-# layout/driver — check membership against this tuple, not equality against
-# a single Key, so international users aren't silently locked out.
-#
-# Left Alt is deliberately absent. Some virtualized keyboard paths (UTM's,
-# notably) deliver a physical right-side Alt as VK_LMENU, which makes Left
-# Alt tempting to accept -- but on ordinary hardware Left Alt prefixes
-# Alt+Tab, Alt+F4, Alt+Space and every Alt+<letter> menu, so accepting it
-# means all of those open the mic and start a recording.
+# Physical Right Alt/Option, Wingvox's original and default hotkey. On
+# non-US Windows keyboard layouts, pynput can report the same physical key
+# as alt_gr instead of alt_r depending on layout/driver -- check membership
+# against a tuple, not equality against a single Key, so international
+# users aren't silently locked out.
 HOTKEY_KEYS = (keyboard.Key.alt_r,) if IS_MAC else (
     keyboard.Key.alt_r, keyboard.Key.alt_gr,
 )
+
+# Mac only: Left Option as a user-chosen alternative to the default above.
+# Never offered as the default itself -- on ordinary hardware it prefixes
+# Alt+Tab, Alt+F4, Alt+Space and every Alt+<letter> menu (Option+drag,
+# Option+click, Option+Space for the dictionary lookup on Mac), so accepting
+# it unconditionally would mean all of those open the mic instead. As
+# something the user deliberately opts into via hotkey.txt, trading those
+# away is their call to make, not Wingvox's to make for them. Not offered on
+# Windows: Left Alt was tried there and reverted (see install.sh history) for
+# the identical Alt+Tab/Alt+F4 conflict, and Windows has no per-user hotkey
+# picker yet to make it an informed opt-in rather than a silent default.
+MAC_HOTKEY_LABELS = {"right": "Right Option", "left": "Left Option"}
+
+
+def mac_hotkey_keys(choice: str):
+    """pynput Key objects for the given Mac hotkey choice. Any value other
+    than "left" resolves to "right" -- a corrupted or hand-edited
+    hotkey.txt should degrade to Wingvox's known-good default, not to no
+    hotkey working at all."""
+    if choice == "left":
+        return (keyboard.Key.alt_l,)
+    return (keyboard.Key.alt_r,)
+
 
 if IS_WINDOWS:
     import ctypes
     VK_RMENU = 0xA5
 
-    def is_hotkey_physically_down() -> bool:
+    def is_hotkey_physically_down(_choice: str = "right") -> bool:
         """Whether the dictation key is physically held right now, read from
         the hardware rather than from the keyboard hook.
 
@@ -56,27 +74,34 @@ if IS_WINDOWS:
         press fires, the matching release never does, and the recording
         stays open forever. Callers poll this as a backstop. It reports on
         exactly the key HOTKEY_KEYS accepts -- polling Left Alt too would
-        end a recording on an unrelated Alt+Tab."""
+        end a recording on an unrelated Alt+Tab.
+
+        Windows has no hotkey choice yet, so _choice is accepted (to keep
+        one call signature across platforms) and ignored."""
         return bool(ctypes.windll.user32.GetAsyncKeyState(VK_RMENU) & 0x8000)
 elif IS_MAC:
-    # Right Option. Apple's virtual keycodes are physical positions, not
-    # characters, so this is stable across keyboard layouts.
+    # Apple's virtual keycodes are physical positions, not characters, so
+    # these are stable across keyboard layouts.
     _KVK_RIGHT_OPTION = 61
+    _KVK_LEFT_OPTION = 58
+    _MAC_HOTKEY_VK = {"right": _KVK_RIGHT_OPTION, "left": _KVK_LEFT_OPTION}
 
-    def is_hotkey_physically_down() -> bool:
+    def is_hotkey_physically_down(choice: str = "right") -> bool:
         """Mac counterpart of the Windows check above. Same purpose: a
         dropped release must not be able to wedge a recording open, and a
         wedged recording can only be cleared by restarting the app."""
         try:
             from Quartz import CGEventSourceKeyState, kCGEventSourceStateHIDSystemState
-            return bool(CGEventSourceKeyState(kCGEventSourceStateHIDSystemState,
-                                              _KVK_RIGHT_OPTION))
+            return bool(CGEventSourceKeyState(
+                kCGEventSourceStateHIDSystemState,
+                _MAC_HOTKEY_VK.get(choice, _KVK_RIGHT_OPTION),
+            ))
         except Exception:
             # Can't read the hardware -- claim the key is still down so the
             # watchdog never ends a recording the user is in the middle of.
             return True
 else:
-    def is_hotkey_physically_down() -> bool:
+    def is_hotkey_physically_down(_choice: str = "right") -> bool:
         return True
 
 
@@ -503,3 +528,57 @@ def default_windows_input_device(sd):
     except Exception:
         pass
     return None
+
+
+# CoreAudio's fixed identifier for a Mac's internal microphone hardware,
+# stable across every model that has one (unlike its display name, which is
+# "MacBook Air Microphone" on an Air and "MacBook Pro Microphone" on a Pro).
+_BUILTIN_MIC_UID = "BuiltInMicrophoneDevice"
+
+
+def mac_builtin_mic_name():
+    """The real name CoreAudio gave this Mac's built-in microphone, or None
+    if there isn't one (a Mac mini/Studio/Pro with no internal mic) or it
+    can't be determined.
+
+    Matching a hardcoded string like "MacBook Air Microphone" only works on
+    an Air. The tempting fix -- AVCaptureDevice.defaultDeviceWithDeviceType_
+    mediaType_position_(AVCaptureDeviceTypeBuiltInMicrophone, ...) -- turns
+    out not to work at all: modern macOS collapsed every distinct mic type
+    into one generic AVCaptureDeviceTypeMicrophone, so that call ignores the
+    "built-in" request and just hands back the current system default. On a
+    machine with Bluetooth headphones connected, that reintroduces the exact
+    bug this function exists to avoid. Discovering every AVCaptureDeviceType
+    Microphone and matching by uniqueID() against CoreAudio's fixed built-in
+    identifier is what actually finds the hardware."""
+    if not IS_MAC:
+        return None
+    try:
+        from AVFoundation import AVCaptureDeviceDiscoverySession, AVCaptureDeviceTypeMicrophone, AVMediaTypeAudio
+        # AVCaptureDeviceDiscoverySession emits an ObjC-runtime NSLog warning
+        # about deprecated Continuity Camera device types on every call, on
+        # every macOS version this was tested on -- unrelated to audio, and
+        # not something a Python try/except can catch since it's written
+        # straight to the fd, not raised as an exception. Left alone, it
+        # would print on every single flow.py invocation (this runs at
+        # import time), reading as an error to anyone watching the log.
+        # Silence just the fd for the duration of this one call.
+        stderr_fd = sys.stderr.fileno()
+        saved_fd = os.dup(stderr_fd)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull_fd, stderr_fd)
+            session = AVCaptureDeviceDiscoverySession.discoverySessionWithDeviceTypes_mediaType_position_(
+                [AVCaptureDeviceTypeMicrophone], AVMediaTypeAudio, 0  # AVCaptureDevicePositionUnspecified
+            )
+            devices = list(session.devices())
+        finally:
+            os.dup2(saved_fd, stderr_fd)
+            os.close(saved_fd)
+            os.close(devnull_fd)
+        for device in devices:
+            if str(device.uniqueID()) == _BUILTIN_MIC_UID:
+                return str(device.localizedName())
+        return None
+    except Exception:
+        return None

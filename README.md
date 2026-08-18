@@ -59,6 +59,17 @@ any time to add it.
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.
 
+The dictation hotkey defaults to **Right Option**. To switch to **Left
+Option** (or back), run from the Wingvox folder:
+
+```bash
+./set-hotkey.sh left    # or: right
+```
+
+Left Option isn't offered as the default because it prefixes real system
+shortcuts (Option+drag, Option+click, Option+Space for the dictionary
+lookup) -- those start a recording instead while Wingvox is running.
+
 To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
 you when there's something to take; it never installs anything on its own.
 

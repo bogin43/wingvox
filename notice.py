@@ -87,14 +87,41 @@ def _prompt_mac(title: str, body: str) -> bool:
     because Wingvox is LSUIElement: without it the alert can open behind
     whatever the user is looking at, and a modal you can't see reads as a
     hang.
+
+    The body goes in a fixed-size accessoryView, not informativeText.
+    informativeText auto-sizes the whole panel to its content *after* the
+    first paint -- with text this long that's a visible resize a moment
+    after the alert appears, which reads as one dialog being replaced by a
+    different, differently-sized one (caught by the user during testing:
+    the notice looked cut off, like a second box had swapped in for the
+    first). A fixed-frame scroll view has nothing to recalculate, so it
+    just appears once, correctly sized, with a scrollbar if the text
+    outgrows it rather than a layout jump.
     """
     from AppKit import (NSAlert, NSApplication, NSApplicationActivationPolicyAccessory,
-                        NSAlertFirstButtonReturn)
+                        NSAlertFirstButtonReturn, NSScrollView, NSTextView,
+                        NSMakeRect, NSFont)
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     alert = NSAlert.alloc().init()
     alert.setMessageText_(title)
-    alert.setInformativeText_(body)
+
+    width, height = 420, 220
+    text_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    text_view.setString_(body)
+    text_view.setEditable_(False)
+    text_view.setSelectable_(True)
+    text_view.setFont_(NSFont.systemFontOfSize_(13))
+    text_view.setVerticallyResizable_(True)
+    text_view.setHorizontallyResizable_(False)
+    text_view.setAutoresizingMask_(1 << 1)  # width tracks the scroll view
+
+    scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    scroll.setDocumentView_(text_view)
+    scroll.setHasVerticalScroller_(True)
+    scroll.setBorderType_(1)  # NSBezelBorder -- makes the fixed frame visually obvious
+    alert.setAccessoryView_(scroll)
+
     alert.addButtonWithTitle_("Agree and continue")
     alert.addButtonWithTitle_("Quit")
     app.activateIgnoringOtherApps_(True)
