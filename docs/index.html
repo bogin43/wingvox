@@ -641,7 +641,8 @@ function selectOS(os) {
   document.getElementById('install-cmd').textContent = data.cmd;
   document.getElementById('install-requirement').textContent = data.requirement;
   document.getElementById('install-notice').innerHTML = data.notice.map(n => `<li>${n}</li>`).join('');
-  document.getElementById('install-walkthrough').innerHTML = data.walkthrough.map(s => `<li>${s}</li>`).join('');
+  document.getElementById('install-walkthrough').innerHTML =
+    data.walkthrough.map(s => `<li><span class="wt-body">${s}</span></li>`).join('');
   document.querySelectorAll('.os-tab').forEach(b => b.classList.toggle('active', b.dataset.os === os));
 }
 
