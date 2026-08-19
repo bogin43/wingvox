@@ -134,9 +134,10 @@ schtasks /run /tn Wingvox
 
 **Turning it off for a while.** If Wingvox is competing for the hotkey or the
 mic with something else — a VM, a game, screen-sharing software, another
-dictation tool — double-click **`wingvox-off.cmd`** in the Wingvox folder. It
-stays off (including across reboots) until you double-click
-**`wingvox-on.cmd`**. Neither one uninstalls anything.
+dictation tool, or it's just stuck — run `./wingvox-off.sh` from the Wingvox
+folder (on Windows, double-click **`wingvox-off.cmd`**). It stays off
+(including across reboots) until you run `./wingvox-on.sh` (or
+**`wingvox-on.cmd`** on Windows). Neither one uninstalls anything.
 
 ### Both platforms
 
