@@ -315,6 +315,49 @@
     margin-bottom: 8px;
   }
 
+  /* ---------- languages ---------- */
+  .lang-toggle {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .lang-toggle summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 16px 20px;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    letter-spacing: 0.03em;
+    color: var(--brown);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .lang-toggle summary::-webkit-details-marker { display: none; }
+  .lang-toggle summary::after {
+    content: "+";
+    font-family: var(--display);
+    font-size: 1.1rem;
+  }
+  .lang-toggle[open] summary::after { content: "\2212"; }
+  .lang-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 4px 16px;
+    padding: 4px 20px 20px;
+    font-size: 0.84rem;
+  }
+  .lang-grid span { color: var(--muted); }
+  .lang-grid code {
+    font-family: var(--mono);
+    color: var(--clay);
+    font-size: 0.76rem;
+  }
+  @media (max-width: 720px) {
+    .lang-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
   /* ---------- notice ---------- */
   .notice {
     background: var(--surface);
@@ -418,6 +461,122 @@
       <div class="step"><span class="k">Tidy</span>A local model strips the ums and fixes punctuation.</div>
       <div class="step"><span class="k">Paste</span>The text lands wherever your cursor is.</div>
     </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Not just English</p>
+    <h2>100 languages, one command</h2>
+    <p class="lede" style="max-width:56ch;margin-bottom:20px">
+      Wingvox dictates in English by default. Switch with one command from the
+      Wingvox folder: <code>./set-language.sh fr</code>. Flemish has no
+      separate code of its own — it transcribes as Dutch (<code>nl</code>),
+      the same written standard as Netherlands Dutch.
+    </p>
+    <details class="lang-toggle">
+      <summary>See all 100 supported languages</summary>
+      <div class="lang-grid">
+      <span>Afrikaans</span><code>af</code>
+      <span>Albanian</span><code>sq</code>
+      <span>Amharic</span><code>am</code>
+      <span>Arabic</span><code>ar</code>
+      <span>Armenian</span><code>hy</code>
+      <span>Assamese</span><code>as</code>
+      <span>Azerbaijani</span><code>az</code>
+      <span>Bashkir</span><code>ba</code>
+      <span>Basque</span><code>eu</code>
+      <span>Belarusian</span><code>be</code>
+      <span>Bengali</span><code>bn</code>
+      <span>Bosnian</span><code>bs</code>
+      <span>Breton</span><code>br</code>
+      <span>Bulgarian</span><code>bg</code>
+      <span>Cantonese</span><code>yue</code>
+      <span>Catalan</span><code>ca</code>
+      <span>Chinese</span><code>zh</code>
+      <span>Croatian</span><code>hr</code>
+      <span>Czech</span><code>cs</code>
+      <span>Danish</span><code>da</code>
+      <span>Dutch</span><code>nl</code>
+      <span>English</span><code>en</code>
+      <span>Estonian</span><code>et</code>
+      <span>Faroese</span><code>fo</code>
+      <span>Finnish</span><code>fi</code>
+      <span>French</span><code>fr</code>
+      <span>Galician</span><code>gl</code>
+      <span>Georgian</span><code>ka</code>
+      <span>German</span><code>de</code>
+      <span>Greek</span><code>el</code>
+      <span>Gujarati</span><code>gu</code>
+      <span>Haitian Creole</span><code>ht</code>
+      <span>Hausa</span><code>ha</code>
+      <span>Hawaiian</span><code>haw</code>
+      <span>Hebrew</span><code>he</code>
+      <span>Hindi</span><code>hi</code>
+      <span>Hungarian</span><code>hu</code>
+      <span>Icelandic</span><code>is</code>
+      <span>Indonesian</span><code>id</code>
+      <span>Italian</span><code>it</code>
+      <span>Japanese</span><code>ja</code>
+      <span>Javanese</span><code>jw</code>
+      <span>Kannada</span><code>kn</code>
+      <span>Kazakh</span><code>kk</code>
+      <span>Khmer</span><code>km</code>
+      <span>Korean</span><code>ko</code>
+      <span>Lao</span><code>lo</code>
+      <span>Latin</span><code>la</code>
+      <span>Latvian</span><code>lv</code>
+      <span>Lingala</span><code>ln</code>
+      <span>Lithuanian</span><code>lt</code>
+      <span>Luxembourgish</span><code>lb</code>
+      <span>Macedonian</span><code>mk</code>
+      <span>Malagasy</span><code>mg</code>
+      <span>Malay</span><code>ms</code>
+      <span>Malayalam</span><code>ml</code>
+      <span>Maltese</span><code>mt</code>
+      <span>Maori</span><code>mi</code>
+      <span>Marathi</span><code>mr</code>
+      <span>Mongolian</span><code>mn</code>
+      <span>Myanmar</span><code>my</code>
+      <span>Nepali</span><code>ne</code>
+      <span>Norwegian</span><code>no</code>
+      <span>Nynorsk</span><code>nn</code>
+      <span>Occitan</span><code>oc</code>
+      <span>Pashto</span><code>ps</code>
+      <span>Persian</span><code>fa</code>
+      <span>Polish</span><code>pl</code>
+      <span>Portuguese</span><code>pt</code>
+      <span>Punjabi</span><code>pa</code>
+      <span>Romanian</span><code>ro</code>
+      <span>Russian</span><code>ru</code>
+      <span>Sanskrit</span><code>sa</code>
+      <span>Serbian</span><code>sr</code>
+      <span>Shona</span><code>sn</code>
+      <span>Sindhi</span><code>sd</code>
+      <span>Sinhala</span><code>si</code>
+      <span>Slovak</span><code>sk</code>
+      <span>Slovenian</span><code>sl</code>
+      <span>Somali</span><code>so</code>
+      <span>Spanish</span><code>es</code>
+      <span>Sundanese</span><code>su</code>
+      <span>Swahili</span><code>sw</code>
+      <span>Swedish</span><code>sv</code>
+      <span>Tagalog</span><code>tl</code>
+      <span>Tajik</span><code>tg</code>
+      <span>Tamil</span><code>ta</code>
+      <span>Tatar</span><code>tt</code>
+      <span>Telugu</span><code>te</code>
+      <span>Thai</span><code>th</code>
+      <span>Tibetan</span><code>bo</code>
+      <span>Turkish</span><code>tr</code>
+      <span>Turkmen</span><code>tk</code>
+      <span>Ukrainian</span><code>uk</code>
+      <span>Urdu</span><code>ur</code>
+      <span>Uzbek</span><code>uz</code>
+      <span>Vietnamese</span><code>vi</code>
+      <span>Welsh</span><code>cy</code>
+      <span>Yiddish</span><code>yi</code>
+      <span>Yoruba</span><code>yo</code>
+      </div>
+    </details>
   </section>
 
   <section>

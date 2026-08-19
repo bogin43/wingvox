@@ -177,6 +177,57 @@ settings > Environment Variables):
 `device`/`compute_type` are set to `"auto"`, so a CUDA GPU is used
 automatically if present; otherwise it falls back to CPU with int8 quantization.
 
+## Supported languages
+
+Wingvox dictates in English by default. To switch, from the Wingvox folder:
+
+```bash
+cd ~/wingvox && ./set-language.sh fr
+```
+
+Any of the 100 codes below works. Flemish has no separate code of its own --
+it's transcribed as Dutch (`nl`), the same written standard as Netherlands
+Dutch. On Windows, the default speech model is English-only regardless of
+this setting; switching languages there also needs
+`WINGVOX_WHISPER_MODEL=small` set by hand.
+
+| Language | Code | | Language | Code | | Language | Code |
+|---|---|---|---|---|---|---|---|
+| Afrikaans | `af` | | Albanian | `sq` | | Amharic | `am` |
+| Arabic | `ar` | | Armenian | `hy` | | Assamese | `as` |
+| Azerbaijani | `az` | | Bashkir | `ba` | | Basque | `eu` |
+| Belarusian | `be` | | Bengali | `bn` | | Bosnian | `bs` |
+| Breton | `br` | | Bulgarian | `bg` | | Cantonese | `yue` |
+| Catalan | `ca` | | Chinese | `zh` | | Croatian | `hr` |
+| Czech | `cs` | | Danish | `da` | | Dutch | `nl` |
+| English | `en` | | Estonian | `et` | | Faroese | `fo` |
+| Finnish | `fi` | | French | `fr` | | Galician | `gl` |
+| Georgian | `ka` | | German | `de` | | Greek | `el` |
+| Gujarati | `gu` | | Haitian Creole | `ht` | | Hausa | `ha` |
+| Hawaiian | `haw` | | Hebrew | `he` | | Hindi | `hi` |
+| Hungarian | `hu` | | Icelandic | `is` | | Indonesian | `id` |
+| Italian | `it` | | Japanese | `ja` | | Javanese | `jw` |
+| Kannada | `kn` | | Kazakh | `kk` | | Khmer | `km` |
+| Korean | `ko` | | Lao | `lo` | | Latin | `la` |
+| Latvian | `lv` | | Lingala | `ln` | | Lithuanian | `lt` |
+| Luxembourgish | `lb` | | Macedonian | `mk` | | Malagasy | `mg` |
+| Malay | `ms` | | Malayalam | `ml` | | Maltese | `mt` |
+| Maori | `mi` | | Marathi | `mr` | | Mongolian | `mn` |
+| Myanmar | `my` | | Nepali | `ne` | | Norwegian | `no` |
+| Nynorsk | `nn` | | Occitan | `oc` | | Pashto | `ps` |
+| Persian | `fa` | | Polish | `pl` | | Portuguese | `pt` |
+| Punjabi | `pa` | | Romanian | `ro` | | Russian | `ru` |
+| Sanskrit | `sa` | | Serbian | `sr` | | Shona | `sn` |
+| Sindhi | `sd` | | Sinhala | `si` | | Slovak | `sk` |
+| Slovenian | `sl` | | Somali | `so` | | Spanish | `es` |
+| Sundanese | `su` | | Swahili | `sw` | | Swedish | `sv` |
+| Tagalog | `tl` | | Tajik | `tg` | | Tamil | `ta` |
+| Tatar | `tt` | | Telugu | `te` | | Thai | `th` |
+| Tibetan | `bo` | | Turkish | `tr` | | Turkmen | `tk` |
+| Ukrainian | `uk` | | Urdu | `ur` | | Uzbek | `uz` |
+| Vietnamese | `vi` | | Welsh | `cy` | | Yiddish | `yi` |
+| Yoruba | `yo` | |  |  | |  |  |
+
 ## Updates and notices
 
 Wingvox checks once at startup whether a newer version has been published. It
