@@ -70,6 +70,20 @@ Left Option isn't offered as the default because it prefixes real system
 shortcuts (Option+drag, Option+click, Option+Space for the dictionary
 lookup) -- those start a recording instead while Wingvox is running.
 
+Wingvox dictates in **English** by default. To dictate in another language,
+run from the Wingvox folder:
+
+```bash
+./set-language.sh fr   # French. Also: nl (Dutch, covers Flemish), es, de, pt, it, ...
+```
+
+Whisper handles ~100 languages; the few named above are just the ones
+that print a friendly name. Any other ISO 639-1 code works too. Flemish
+has no separate code of its own -- it's transcribed as Dutch (`nl`), same
+written standard as Netherlands Dutch. Windows note: the default speech
+model is English-only, so this needs `WINGVOX_WHISPER_MODEL=small` set by
+hand too; `./set-language.sh` says so if you try it there.
+
 To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
 you when there's something to take; it never installs anything on its own.
 

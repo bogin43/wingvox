@@ -32,13 +32,20 @@ def _get_model():
     return _model
 
 
-def run_model(audio, prompt):
+def run_model(audio, prompt, language="en"):
     """Returns a list of segment dicts with at least text/no_speech_prob/
-    compression_ratio, matching stt_mac.run_model's contract."""
+    compression_ratio, matching stt_mac.run_model's contract.
+
+    language is accepted for parity with stt_mac's signature, but WHISPER_MODEL
+    defaults to "small.en" -- an English-only model variant that can't decode
+    other languages no matter what's passed here. A non-English language.txt
+    setting is silently ineffective on Windows until WINGVOX_WHISPER_MODEL is
+    also set to a multilingual model (e.g. "small") by hand; flow.py doesn't
+    enforce that pairing today."""
     model = _get_model()
     with _transcribe_lock:
         segments, _info = model.transcribe(
-            audio, language="en", initial_prompt=prompt,
+            audio, language=language, initial_prompt=prompt,
             condition_on_previous_text=False,
             # beam_size=5 (faster-whisper's default) barely changes accuracy
             # on short push-to-talk clips but costs real time on CPU --

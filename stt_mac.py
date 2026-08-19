@@ -20,14 +20,20 @@ WHISPER_REPO = os.environ.get(
 _whisper_lock = threading.Lock()
 
 
-def run_model(audio, prompt):
+def run_model(audio, prompt, language="en"):
     """Returns a list of segment dicts (mlx_whisper's own dict format) with
     at least text/no_speech_prob/compression_ratio — flow.py's
-    hallucination filters read these fields directly."""
+    hallucination filters read these fields directly.
+
+    language is a Whisper language code ("en", "fr", "nl", ...) or None to
+    let Whisper auto-detect per utterance. Explicit is preferred over auto-
+    detect: it's faster (skips the detection pass), and doesn't risk one
+    ambiguous short clip being misdetected and decoded in the wrong
+    language entirely."""
     import mlx_whisper
     with _whisper_lock:
         result = mlx_whisper.transcribe(
             audio, path_or_hf_repo=WHISPER_REPO, initial_prompt=prompt,
-            language="en", fp16=True, condition_on_previous_text=False,
+            language=language, fp16=True, condition_on_previous_text=False,
         )
     return result["segments"]
