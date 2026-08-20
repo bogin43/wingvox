@@ -7,10 +7,10 @@ set -euo pipefail
 REPO_URL="https://github.com/bogin43/wingvox.git"
 TARGET_DIR="$HOME/wingvox"
 
-if [[ "$(uname -m)" != "arm64" ]]; then
-    echo "Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4)." >&2
-    echo "This Mac reports '$(uname -m)', which the ML framework Wingvox" >&2
-    echo "is built on (mlx) does not support." >&2
+ARCH="$(uname -m)"
+if [[ "$ARCH" != "arm64" && "$ARCH" != "x86_64" ]]; then
+    echo "Wingvox requires an Apple Silicon or Intel Mac." >&2
+    echo "This Mac reports '$ARCH', which isn't either." >&2
     exit 1
 fi
 

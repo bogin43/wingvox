@@ -602,7 +602,7 @@
 const OS_DATA = {
   mac: {
     cmd: 'curl -fsSL https://bogin43.github.io/wingvox/mac | bash',
-    requirement: 'Needs an Apple Silicon Mac (M1, M2, M3 or M4) on macOS 14 Sonoma or newer. Open Terminal — press ⌘ + Space, type "terminal", press Return — then paste this and press Return.',
+    requirement: 'Needs a Mac on macOS 14 Sonoma or newer (Apple Silicon: M1, M2, M3 or M4) or macOS 11 Big Sur or newer (Intel). Open Terminal — press ⌘ + Space, type "terminal", press Return — then paste this and press Return.',
     walkthrough: [
       'It asks for your Mac password, because it installs Homebrew. <strong>Nothing appears as you type</strong> — no dots, no moving cursor. That is normal. Type it and press Return.',
       'It downloads about 2.6GB of speech and language models. Expect 10 to 30 minutes depending on your connection. You can leave it running.',
@@ -612,7 +612,7 @@ const OS_DATA = {
     ],
     notice: [
       'It asks for <strong>Microphone</strong> and <strong>Accessibility</strong> permission, to hear you and to paste into other apps.',
-      'It installs Homebrew, Xcode Command Line Tools and Ollama if your Mac does not already have them.',
+      'It installs Homebrew, Xcode Command Line Tools and Ollama if your Mac does not already have them (on Intel Macs, Python itself comes from <strong>uv</strong> instead of Homebrew).',
       'About 2.6GB of models. For a ~0.9GB install without the cleanup pass, put <code>WINGVOX_LITE=1</code> in front of the command — dictation still works, it just pastes exactly what you said.',
       'Transcription and cleanup both happen locally, so no audio or text is sent anywhere.'
     ]

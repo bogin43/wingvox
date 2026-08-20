@@ -12,8 +12,8 @@ numpy
 # ~176MB that stt_mac.py's code path never touches. torch is never imported
 # at all, and numba/scipy are only reached by mlx_whisper's unused
 # word-timestamps feature, which flow.py fakes out with sys.modules stubs
-# (flow.py:36). The installer used to download all of it and then uninstall
-# it again on every single install.
+# (see the IS_ARM_MAC block near the top of flow.py). The installer used to
+# download all of it and then uninstall it again on every single install.
 #
 # The lines below are mlx-whisper's remaining, genuinely-needed
 # dependencies, spelled out because --no-deps means pip won't resolve them.
@@ -22,11 +22,20 @@ numpy
 #
 # Installing by hand? Use:
 #   pip install -r requirements.txt && pip install --no-deps mlx-whisper
-mlx; sys_platform == "darwin"
-more-itertools; sys_platform == "darwin"
-tiktoken; sys_platform == "darwin"
-tqdm; sys_platform == "darwin"
-huggingface_hub; sys_platform == "darwin"
+#
+# mlx has no x86_64 build at all -- Apple-Silicon architecture only, not a
+# version gap -- so this tier is gated on platform_machine == "arm64" too, or
+# pip would try (and fail) to resolve mlx on an Intel Mac.
+mlx; sys_platform == "darwin" and platform_machine == "arm64"
+more-itertools; sys_platform == "darwin" and platform_machine == "arm64"
+tiktoken; sys_platform == "darwin" and platform_machine == "arm64"
+tqdm; sys_platform == "darwin" and platform_machine == "arm64"
+huggingface_hub; sys_platform == "darwin" and platform_machine == "arm64"
+
+# Intel Macs use the same faster-whisper/CTranslate2 backend as Windows (see
+# stt_intel_mac.py, a thin re-export of stt_windows.py). ctranslate2
+# publishes native macosx_11_0_x86_64 wheels, confirmed via PyPI.
+faster-whisper; sys_platform == "darwin" and platform_machine == "x86_64"
 
 # Needed to build Wingvox.app (setup.py's py2app step). Installed explicitly
 # here rather than relying on setuptools' `setup_requires` auto-fetch, which

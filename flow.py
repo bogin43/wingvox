@@ -27,16 +27,15 @@ from pathlib import Path
 import notice
 import platform_compat as pc
 
-if pc.IS_MAC and platform.machine() != "arm64":
+if pc.IS_MAC and platform.machine() not in ("arm64", "x86_64"):
     sys.exit(
-        f"Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4). This Mac "
-        f"reports '{platform.machine()}', which mlx (the ML framework "
-        f"Wingvox is built on) does not support."
+        f"Wingvox requires an Apple Silicon or Intel Mac. This Mac "
+        f"reports '{platform.machine()}', which isn't either."
     )
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-if pc.IS_MAC:
+if pc.IS_ARM_MAC:
     # mlx_whisper unconditionally imports numba + scipy.signal at module load
     # (mlx_whisper/timing.py, for its word-timestamp alignment feature), even
     # though flow.py never passes word_timestamps=True and that code path is
@@ -60,8 +59,10 @@ import requests
 import sounddevice as sd
 from pynput import keyboard
 
-if pc.IS_MAC:
+if pc.IS_ARM_MAC:
     import stt_mac as stt
+elif pc.IS_INTEL_MAC:
+    import stt_intel_mac as stt
 else:
     import stt_windows as stt
 

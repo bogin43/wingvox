@@ -9,7 +9,7 @@ Jump to: [Mac](#mac-setup) · [Windows](#windows-setup)
 
 ## Mac setup
 
-**Prerequisites**: you're on an Apple Silicon Mac (M1/M2/M3/M4), and
+**Prerequisites**: you're on a Mac (Apple Silicon or Intel), and
 `install.sh` finished without printing an error.
 
 ### 1. Microphone

@@ -6,15 +6,17 @@ Fully offline voice dictation. Hold the dictation hotkey (**Right Option** on
 Mac, **Right Alt** on Windows), speak, release. Cleaned-up text is pasted
 wherever your cursor is focused.
 
-Pipeline: mic -> Whisper (mlx-whisper on Mac, faster-whisper on Windows) -> Ollama
-qwen2.5:3b cleanup -> clipboard + paste.
+Pipeline: mic -> Whisper (mlx-whisper on Apple Silicon Mac, faster-whisper on
+Intel Mac and Windows) -> Ollama qwen2.5:3b cleanup -> clipboard + paste.
 
 > This is a personal project, shared as-is in case it's useful to others, not a
 > polished product with official support. On Mac it requires **Microphone** and
 > **Accessibility** permissions (see below for why); on
 > Windows, **Microphone** access and an antivirus that doesn't block global hotkeys.
 > The installer will install Homebrew/Xcode Command Line Tools/Ollama (Mac) or
-> winget/Ollama (Windows) if they're missing. Read the script before running it if
+> winget/Ollama (Windows) if they're missing — plus [uv](https://astral.sh/uv)
+> for Python specifically on Intel Mac, not Homebrew (see Requirements below).
+> Read the script before running it if
 > you'd like to know exactly what it does. Use at your own risk. The Windows build
 > isn't code-signed yet, so expect a SmartScreen warning on first launch.
 
@@ -22,8 +24,10 @@ qwen2.5:3b cleanup -> clipboard + paste.
 
 ### Mac
 
-Requires an Apple Silicon Mac (M1/M2/M3/M4) running macOS 14 Sonoma or newer.
-Intel Macs aren't supported: the speech engine (mlx) is Apple Silicon only.
+Requires a Mac running macOS 14 Sonoma or newer on Apple Silicon (M1/M2/M3/M4),
+or macOS 11 Big Sur or newer on Intel. Apple Silicon uses mlx-whisper, running
+on the GPU/Neural Engine; Intel Macs use the same CPU-based faster-whisper
+engine as Windows, so expect a bit more latency than on Apple Silicon.
 Open Terminal and run:
 
 ```bash
@@ -166,10 +170,18 @@ Tkinter has no true per-pixel transparency on Windows, only a colorkey.)
 
 Handled automatically by the installer:
 
-**Mac**
+**Mac (Apple Silicon)**
 - Ollama running as a service, with `qwen2.5:3b` pulled
 - Whisper weights cached at `~/.cache/huggingface` (downloaded once; works offline after)
 - venv with mlx-whisper, sounddevice, pynput, requests, and the pyobjc framework bindings
+
+**Mac (Intel)**
+- Python 3.12 via [uv](https://astral.sh/uv), not Homebrew — Homebrew is winding
+  down Intel Mac support (Tier 3 from September 2026, dropped entirely
+  September 2027), so Python comes from uv's own standalone builds instead
+- Ollama running as a service, with `qwen2.5:3b` pulled (still via Homebrew for now)
+- Whisper weights (faster-whisper/CTranslate2 format) cached on first run; works offline after
+- venv with faster-whisper, sounddevice, pynput, requests, and the pyobjc framework bindings
 
 **Windows**
 - Ollama running, with `qwen2.5:3b` pulled

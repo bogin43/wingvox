@@ -14,6 +14,11 @@ from pynput import keyboard
 IS_WINDOWS = platform.system() == "Windows"
 IS_MAC = platform.system() == "Darwin"
 
+# The STT backend (mlx vs faster-whisper) and some install-time decisions
+# depend on Mac architecture, not just "is this a Mac".
+IS_ARM_MAC = IS_MAC and platform.machine() == "arm64"
+IS_INTEL_MAC = IS_MAC and platform.machine() == "x86_64"
+
 # install.ps1 always installs x64 Python -- faster-whisper's ctranslate2
 # dependency has no Windows ARM64 wheels, so every Windows install of this
 # app runs x64 Python even on ARM64 hardware. But platform.machine() reports

@@ -31,34 +31,61 @@ echo "    This location is now permanent — the app and its background"
 echo "    service both reference this exact folder path. Don't move it"
 echo "    after install without re-running this script."
 
-# ---------- 1. Apple Silicon check ----------
-step "Checking for Apple Silicon"
-if [[ "$(uname -m)" != "arm64" ]]; then
-    echo "Wingvox requires an Apple Silicon Mac (M1/M2/M3/M4)." >&2
-    echo "This Mac reports '$(uname -m)', which the ML framework Wingvox" >&2
-    echo "is built on (mlx) does not support." >&2
+# ---------- 1. Mac architecture ----------
+# Determines which speech-engine path the rest of this script (and
+# requirements.txt) takes: mlx on Apple Silicon, faster-whisper/CTranslate2
+# on Intel. Exported so later steps don't re-run `uname -m` and can't get out
+# of sync with this decision.
+step "Checking Mac architecture"
+MAC_ARCH="$(uname -m)"
+if [[ "$MAC_ARCH" == "arm64" ]]; then
+    echo "    OK — Apple Silicon detected."
+elif [[ "$MAC_ARCH" == "x86_64" ]]; then
+    echo "    OK — Intel Mac detected (using the faster-whisper speech engine)."
+else
+    echo "Wingvox requires an Apple Silicon or Intel Mac." >&2
+    echo "This Mac reports '$MAC_ARCH', which isn't either." >&2
     exit 1
 fi
-echo "    OK — Apple Silicon detected."
+export MAC_ARCH
 
 # ---------- 1b. macOS version ----------
-# mlx publishes arm64 wheels tagged macosx_14_0 and up. On macOS 13 (Ventura)
-# and older, pip doesn't fail -- it quietly walks back to mlx 0.29.3, the last
-# release with a 13.0 wheel, which current mlx-whisper is not built against.
-# The install then "succeeds" and Wingvox breaks at the first dictation, deep
-# inside a model load, with an error nobody could trace back to their macOS
-# version. Check it here where the message can say what's actually wrong.
+# mlx publishes arm64 wheels tagged macosx_14_0 and up, so Apple Silicon
+# needs macOS 14+. On macOS 13 (Ventura) and older, pip doesn't fail -- it
+# quietly walks back to mlx 0.29.3, the last release with a 13.0 wheel, which
+# current mlx-whisper is not built against. The install then "succeeds" and
+# Wingvox breaks at the first dictation, deep inside a model load, with an
+# error nobody could trace back to their macOS version. Check it here where
+# the message can say what's actually wrong.
+#
+# Intel Macs have a lower floor: their dependencies (ctranslate2 for speech,
+# pyobjc for permissions) publish wheels back to macOS 11 and 10.13
+# respectively. Since old Intel hardware is frequently stuck below macOS 14
+# and can't upgrade further, holding Intel to the same 14+ floor as Apple
+# Silicon would exclude most of the audience this path exists for.
 step "Checking macOS version"
 MACOS_VER="$(sw_vers -productVersion)"
 MACOS_MAJOR="${MACOS_VER%%.*}"
-if [[ "$MACOS_MAJOR" -lt 14 ]]; then
-    echo "Wingvox needs macOS 14 (Sonoma) or newer. This Mac is on $MACOS_VER." >&2
+MIN_MACOS=14
+[[ "$MAC_ARCH" == "x86_64" ]] && MIN_MACOS=11
+if [[ "$MACOS_MAJOR" -lt "$MIN_MACOS" ]]; then
+    echo "Wingvox needs macOS $MIN_MACOS or newer on this Mac. This one is on $MACOS_VER." >&2
     echo >&2
-    echo "The speech engine (mlx) publishes no build for this version of macOS." >&2
+    if [[ "$MAC_ARCH" == "arm64" ]]; then
+        echo "The speech engine (mlx) publishes no build for this version of macOS." >&2
+    else
+        echo "The speech engine (faster-whisper) and Wingvox's permission handling" >&2
+        echo "publish no build for this version of macOS." >&2
+    fi
     echo "Updating in System Settings > General > Software Update is the only fix." >&2
     exit 1
 fi
 echo "    OK — macOS $MACOS_VER."
+if [[ "$MAC_ARCH" == "x86_64" && "$MACOS_MAJOR" -lt 14 ]]; then
+    echo "    Note: Homebrew may not have a prebuilt python@3.12 for this"
+    echo "    macOS version and will compile it from source instead — the"
+    echo "    first install will take longer than usual."
+fi
 
 # ---------- 2. Xcode Command Line Tools ----------
 step "Checking for Xcode Command Line Tools"
@@ -98,27 +125,62 @@ if ! command -v brew &>/dev/null; then
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     if [[ -x /opt/homebrew/bin/brew ]]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -x /usr/local/bin/brew ]]; then
+        eval "$(/usr/local/bin/brew shellenv)"
     fi
 fi
 echo "    OK — Homebrew available at $(command -v brew)."
 
-# ---------- 4. python@3.12 and Ollama ----------
-# Both come from Homebrew and neither depends on the other, so they go in a
-# single brew call: one dependency-resolution pass instead of two, and brew
-# fetches the bottles concurrently.
-step "Checking for python@3.12 and Ollama"
-BREW_WANTED=()
-brew list python@3.12 &>/dev/null || BREW_WANTED+=(python@3.12)
-if [[ "${WINGVOX_LITE:-}" != "1" ]]; then
-    brew list ollama &>/dev/null || BREW_WANTED+=(ollama)
-fi
-if [[ ${#BREW_WANTED[@]} -gt 0 ]]; then
-    echo "    Installing: ${BREW_WANTED[*]}"
-    brew install "${BREW_WANTED[@]}"
+# ---------- 4. Python and Ollama ----------
+# On Apple Silicon both come from Homebrew, in a single brew call (one
+# dependency-resolution pass, bottles fetched concurrently).
+#
+# On Intel, Python comes from uv instead. Homebrew announced in its 6.0.0
+# release (2026-06-11) that Intel macOS drops to Tier 3 support starting
+# September 2026 -- no more prebuilt bottles, source-compile only -- and
+# loses support entirely in September 2027
+# (https://brew.sh/2026/06/11/homebrew-6.0.0/). Tying Wingvox's Intel install
+# to python@3.12's Homebrew bottle would put it on that same expiration
+# date. uv ships its own standalone CPython builds (python-build-standalone),
+# independent of Homebrew's architecture support, so this sidesteps the
+# whole timeline. Ollama still comes from Homebrew on both arches for now --
+# it's on the same eventual Intel deadline as any other formula, but
+# replacing it isn't in scope here; revisit if/when Homebrew's Tier 3 cutoff
+# actually breaks it.
+step "Checking for Python and Ollama"
+
+if [[ "$MAC_ARCH" == "arm64" ]]; then
+    BREW_WANTED=()
+    brew list python@3.12 &>/dev/null || BREW_WANTED+=(python@3.12)
+    if [[ "${WINGVOX_LITE:-}" != "1" ]]; then
+        brew list ollama &>/dev/null || BREW_WANTED+=(ollama)
+    fi
+    if [[ ${#BREW_WANTED[@]} -gt 0 ]]; then
+        echo "    Installing: ${BREW_WANTED[*]}"
+        brew install "${BREW_WANTED[@]}"
+    else
+        echo "    OK — both already installed."
+    fi
+    PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
 else
-    echo "    OK — both already installed."
+    if ! command -v uv &>/dev/null; then
+        echo "    Installing uv (a standalone Python installer, not tied to Homebrew)…"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+    echo "    Installing Python 3.12 via uv…"
+    uv python install 3.12 -q
+    PYTHON_BIN="$(uv python find 3.12)"
+
+    if [[ "${WINGVOX_LITE:-}" != "1" ]]; then
+        if ! brew list ollama &>/dev/null; then
+            echo "    Installing: ollama"
+            brew install ollama
+        else
+            echo "    OK — ollama already installed."
+        fi
+    fi
 fi
-PYTHON_BIN="$(brew --prefix python@3.12)/bin/python3.12"
 echo "    Using $PYTHON_BIN"
 
 # ---------- 5 & 6. Ollama and the cleanup model ----------
@@ -187,19 +249,34 @@ step "Installing Python dependencies"
 #
 # Older installs still have the discarded packages sitting in their venv
 # from that earlier approach, so clear them out once on upgrade.
-echo "    Installing mlx-whisper (without its unused torch/scipy deps)…"
-"$VENV_PY" -m pip install --no-deps mlx-whisper -q
-"$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite sympy networkx pillow -q 2>/dev/null || true
+#
+# Intel Macs skip this entirely -- they use faster-whisper (installed above
+# via requirements.txt's platform_machine marker), not mlx-whisper, which
+# has no x86_64 build at all.
+if [[ "$MAC_ARCH" == "arm64" ]]; then
+    echo "    Installing mlx-whisper (without its unused torch/scipy deps)…"
+    "$VENV_PY" -m pip install --no-deps mlx-whisper -q
+    "$VENV_PY" -m pip uninstall -y torch numba scipy llvmlite sympy networkx pillow -q 2>/dev/null || true
+else
+    echo "    Skipping mlx-whisper — using faster-whisper (installed via requirements.txt) on Intel."
+fi
 
 # ---------- 7b. Pre-download the Whisper model ----------
-# mlx-whisper fetches its weights lazily on first use, so without this the
-# ~450MB download happens on the first launch instead -- after the install
-# has already reported success. Wingvox then sits on "Loading speech model…"
-# for minutes with no progress shown anywhere, and any dictation attempted
+# Both backends fetch their weights lazily on first use, so without this the
+# download happens on the first launch instead -- after the install has
+# already reported success. Wingvox then sits on "Loading speech model…" for
+# minutes with no progress shown anywhere, and any dictation attempted
 # meanwhile blocks behind it. Reads as a broken install. Pull it here, where
 # the wait is expected.
-step "Downloading the speech model (about 450MB, one time)"
-if ! "$VENV_PY" -c "import stt_mac; from huggingface_hub import snapshot_download; snapshot_download(repo_id=stt_mac.WHISPER_REPO)"; then
+step "Downloading the speech model (one time)"
+if [[ "$MAC_ARCH" == "arm64" ]]; then
+    MODEL_DL_OK=1
+    "$VENV_PY" -c "import stt_mac; from huggingface_hub import snapshot_download; snapshot_download(repo_id=stt_mac.WHISPER_REPO)" || MODEL_DL_OK=0
+else
+    MODEL_DL_OK=1
+    "$VENV_PY" -c "import stt_intel_mac; stt_intel_mac._get_model()" || MODEL_DL_OK=0
+fi
+if [[ "$MODEL_DL_OK" != "1" ]]; then
     echo "    WARNING: couldn't pre-download the speech model."
     echo "    Not fatal — Wingvox fetches it on first launch instead, but the"
     echo "    first dictation will be slow. Check your connection."
