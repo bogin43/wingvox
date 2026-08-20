@@ -215,6 +215,20 @@ going to be going to the beach later today. It's just some cool stuff.
 Known proper nouns / terms — use ONLY if they actually appear in the transcript; never introduce a \
 term from this list that the speaker didn't say: {dictionary}"""
 
+# Appended to CLEANUP_SYSTEM_PROMPT only when this dictation picks up where an
+# unfinished one left off (hotkey released mid-sentence, or the speaker just
+# paused to think) -- see _ends_sentence()/CONTINUATION_WINDOW_SECONDS below.
+# Without this, every dictation is cleaned as if it opens a new sentence, so
+# resuming one mid-thought pastes a capital letter into the middle of it.
+CONTINUATION_NOTE = """
+
+One more thing: this transcript continues directly on from a previous dictation that was cut off \
+before finishing its sentence. That previous dictation ended with: "...{tail}"
+Treat this transcript as the next words of that SAME sentence, not the start of a new one: do NOT \
+capitalize its first word unless it's "I" or a proper noun that would be capitalized there anyway. \
+Only add closing punctuation (a period, question mark, etc.) if this transcript itself brings the \
+sentence to an end -- otherwise leave it open, the way you would in the middle of a sentence."""
+
 
 def load_dictionary() -> str:
     if DICT_PATH.exists():
@@ -646,11 +660,68 @@ def _looks_like_runaway(raw: str, cleaned: str) -> bool:
     return overlap < 0.4 or reverse_overlap < 0.4 or too_long or critical_mismatch
 
 
-def clean_text(raw: str, dictionary: str) -> str:
-    """Returns cleaned text. Raises on Ollama failure (caller decides fallback)."""
+# How long after an unfinished dictation a new one is still assumed to be
+# continuing it, rather than starting a fresh, unrelated thought. Long enough
+# to cover "let go of the hotkey to gather my thoughts", short enough that
+# coming back to dictate into a different field five minutes later doesn't
+# get glued onto whatever came before.
+CONTINUATION_WINDOW_SECONDS = 45.0
+
+
+def _ends_sentence(text: str) -> bool:
+    """Whether `text` closes out a sentence, rather than trailing off
+    mid-thought (a comma, an ellipsis, or no terminal punctuation at all).
+    Drives whether the *next* dictation is treated as continuing this one."""
+    t = text.rstrip().rstrip("\"”’)")
+    if t.endswith("...") or t.endswith("…"):
+        return False
+    return t.endswith((".", "!", "?"))
+
+
+def _tail_words(text: str, n: int = 12) -> str:
+    """Last few words of a cleaned dictation, given to the cleanup model as
+    context when the next dictation continues it."""
+    return " ".join(text.split()[-n:])
+
+
+def _decapitalize_start(text: str, dictionary: str) -> str:
+    """clean_text() always capitalizes the first word -- it has no way to
+    know a dictation is actually continuing a previous, unfinished sentence
+    (the small local cleanup model doesn't reliably follow CONTINUATION_NOTE's
+    ask not to). Called only when this dictation IS a continuation, to fix
+    that deterministically instead. Leaves the word alone when capitalizing
+    it wasn't really "start of sentence" mechanics in the first place: the
+    standalone word "I", an acronym (all-caps, e.g. "NASA"), or one of the
+    user's own dictionary proper nouns."""
+    if not text:
+        return text
+    m = re.match(r"[A-Za-z]+", text)
+    if not m:
+        return text
+    first_word = m.group(0)
+    if first_word == "I":
+        return text
+    if first_word.isupper() and len(first_word) > 1:
+        return text
+    dict_first_words = {
+        t.strip().split()[0].lower() for t in dictionary.split(",") if t.strip()
+    }
+    if first_word.lower() in dict_first_words:
+        return text
+    return text[0].lower() + text[1:]
+
+
+def clean_text(raw: str, dictionary: str, continuation_tail: str = "") -> str:
+    """Returns cleaned text. Raises on Ollama failure (caller decides fallback).
+
+    continuation_tail: the end of a previous, unfinished dictation this one
+    picks up from -- see CONTINUATION_NOTE. Empty string for a fresh dictation.
+    """
     if not raw:
         return ""
     system = CLEANUP_SYSTEM_PROMPT.format(dictionary=dictionary or "none")
+    if continuation_tail:
+        system += CONTINUATION_NOTE.format(tail=continuation_tail)
     r = requests.post(OLLAMA_URL, timeout=60, json={
         "model": OLLAMA_MODEL,
         "messages": [
@@ -863,7 +934,13 @@ def run():
         sys.exit(0)
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
-    state = {"recording": False, "warm": False}
+    state = {
+        "recording": False, "warm": False,
+        # Sentence-continuation tracking (see CONTINUATION_NOTE / _ends_sentence):
+        # whether the last dictation trailed off mid-sentence, when it finished,
+        # and its last few words for context if the next dictation continues it.
+        "mid_sentence": False, "last_end_time": 0.0, "tail": "",
+    }
     finish_lock = threading.Lock()
 
     def _finish_recording(source):
@@ -966,16 +1043,30 @@ def run():
         if not raw:
             status("Heard nothing", "gray", hide_after=2)
             return
+        # Only treat this as continuing the previous dictation's sentence if
+        # that one actually trailed off unfinished, and not so long ago that
+        # this is more likely an unrelated dictation into a different field.
+        continuing = (state["mid_sentence"]
+                      and t0 - state["last_end_time"] < CONTINUATION_WINDOW_SECONDS)
+        tail = state["tail"] if continuing else ""
         status("Cleaning up…")
         try:
-            cleaned = clean_text(raw, dictionary)
+            cleaned = clean_text(raw, dictionary, continuation_tail=tail)
             t2 = time.time()
+            if continuing:
+                cleaned = _decapitalize_start(cleaned, dictionary)
+                # Continuing text pastes right where the previous, unfinished
+                # dictation left off with no space of its own -- add the word
+                # boundary back, since the cleanup model only fixes mechanics
+                # inside the transcript, not the seam between two of them.
+                cleaned = " " + cleaned
             inject(cleaned)
             status(f"✓ {cleaned[:60]}", "green", hide_after=2)
         except Exception:
             t2 = time.time()
+            raw_to_paste = " " + raw if continuing else raw
             try:
-                inject(raw)
+                inject(raw_to_paste)
             except Exception as inject_err:
                 # If this second, fallback inject() also fails, don't let it
                 # propagate uncaught -- process() runs on its own daemon
@@ -995,7 +1086,10 @@ def run():
             else:
                 status("⚠ Cleanup failed (is Ollama running?) — pasted raw transcript",
                        "orange", hide_after=6)
-            cleaned = raw
+            cleaned = raw_to_paste
+        state["mid_sentence"] = not _ends_sentence(cleaned)
+        state["last_end_time"] = time.time()
+        state["tail"] = _tail_words(cleaned)
         print(f"  raw:   {raw}")
         print(f"  clean: {cleaned}")
         print(f"  latency: stt {t1-t0:.2f}s + cleanup {t2-t1:.2f}s = {time.time()-t0:.2f}s")
