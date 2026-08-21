@@ -1049,7 +1049,7 @@ def run():
                 # No Ollama on the machine at all is the lite install, not a
                 # fault -- telling someone to fix a thing they chose is just
                 # nagging. Say what it means and move on.
-                status(f"✓ Ready — hold {HOTKEY_LABEL} to dictate "
+                status(f"✓ Ready — press {HOTKEY_LABEL} to dictate "
                        f"(cleanup off, pasting as spoken)", "green", hide_after=5)
             else:
                 ollama_hint = "brew services start ollama" if pc.IS_MAC else "launch the Ollama app or run 'ollama serve'"
@@ -1063,7 +1063,7 @@ def run():
             status("Warming up cleanup model…", "gray")
             warm_up_llm()
             state["warm"] = True
-            status(f"✓ Ready — hold {HOTKEY_LABEL} to dictate", "green", hide_after=3)
+            status(f"✓ Ready — press {HOTKEY_LABEL} to dictate", "green", hide_after=3)
 
     def process(audio: np.ndarray):
         t0 = time.time()
@@ -1193,7 +1193,7 @@ def run():
             # nothing here can collide with another app's own global
             # hotkey the way a double-tap binding can.
             state["locked"] = True
-            status("● Recording… (press again to stop)")
+            print("  ● Recording… (locked — press again to stop)")
             return
         _finish_recording("on_release")
 
@@ -1289,7 +1289,7 @@ def run():
             print("  ⚠ hotkey listener stopped unexpectedly — restart Wingvox to recover")
 
     threading.Thread(target=_watch_listener, daemon=True).start()
-    print(f"Hold {HOTKEY_LABEL.upper()} to dictate into any app. Ctrl+C here to quit.")
+    print(f"Press {HOTKEY_LABEL.upper()} to dictate into any app. Ctrl+C here to quit.")
     if pc.IS_MAC:
         print("If nothing happens: System Settings > Privacy & Security >")
         print("  turn Wingvox on under Microphone and Accessibility.")
