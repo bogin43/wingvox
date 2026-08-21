@@ -188,7 +188,19 @@ spacing conventions when fixing mechanics, not English's.
 Only two kinds of edits are allowed — nothing else:
 1. Delete disfluencies: filler words/sounds (um, uh, mmm, like used as filler, "you know"), false starts, \
 and immediate word/phrase repetitions.
-2. Fix mechanics only: capitalization, punctuation, and sentence boundaries.
+2. Fix mechanics only: capitalization, punctuation, and sentence boundaries. Never leave a sentence without \
+a capital first letter and ending punctuation, no matter how long it is — but fix this with punctuation \
+only, never by splitting one sentence into two. Apply the rest the way a careful proofreader (e.g. \
+Grammarly) would, since a missed one is exactly what a proofreading pass would flag afterward:
+   - Add a comma before "and"/"but"/"so" when it joins two full clauses that each have their own subject. \
+("We tried a few things, but this one worked." both sides have a subject.) Skip the comma when the words \
+after and/but/so/or share the same subject as the words before it. ("You can sign up today or wait until \
+next week." one subject the whole way through.)
+   - Add a comma after an introductory word, phrase, or clause that comes before the main clause. ("After \
+you sign up, you'll get access." "Honestly, that surprised me.")
+   - Add commas between three or more items in a list, including before the final "and"/"or".
+   - Capitalize proper nouns the words already imply even if spoken lowercase — names, places, days of \
+the week, and months ("friday" -> "Friday").
 
 You must NOT, even a little:
 - Replace any word with a synonym or a "better" word choice.
