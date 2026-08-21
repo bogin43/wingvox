@@ -940,10 +940,16 @@ def run():
         print(f"overlay unavailable ({e}), running terminal-only", file=sys.stderr)
         overlay, run_event_loop = None, None
 
-    def status(text, color="white", hide_after=None):
+    def status(text, color="white", hide_after=None, on_click=None):
         print(f"  {text}")
         if overlay:
-            overlay.show(text, color, hide_after=hide_after)
+            # overlay_windows.StatusOverlay.show() has no on_click param --
+            # forwarding it unconditionally would raise TypeError there the
+            # first time an update is found on Windows.
+            if pc.IS_MAC:
+                overlay.show(text, color, hide_after=hide_after, on_click=on_click)
+            else:
+                overlay.show(text, color, hide_after=hide_after)
 
     mac_permission_flow(status)
 
@@ -1246,20 +1252,58 @@ def run():
         finally:
             warm_done.set()
 
+    def _do_update():
+        # Runs on a background thread -- update.sh itself can block on a
+        # slow git fetch/pull, and must never hold up the Cocoa main thread
+        # that _handle_update_click was called from.
+        result = pc.run_update()
+        if result == "dirty":
+            status("⚠ Update available, but the Wingvox folder has uncommitted "
+                   "changes — commit or discard them, then click again",
+                   "orange", hide_after=12)
+        elif result == "needs_install":
+            status("Update pulled — this one needs the full installer "
+                   "(run install.sh in the Wingvox folder)", "orange")
+        elif result == "up_to_date":
+            # Can legitimately happen: someone else already updated this
+            # machine between the check and the click.
+            status("✓ Already up to date", "green", hide_after=3)
+        elif result == "updated":
+            # update.sh's own `launchctl kickstart -k` is already tearing
+            # this process down to relaunch it at the new commit -- nothing
+            # further to do here (same as the existing permission-grant
+            # restart in mac_permission_flow).
+            pass
+        else:
+            reason = result.split(":", 1)[1] if ":" in result else result
+            status(f"⚠ Update failed ({reason})", "orange", hide_after=12)
+
+    def _handle_update_click():
+        # Called on the main thread (AppKit delivers the click there). Must
+        # not block on network/git -- flip the pill to a non-interactive
+        # "working" state immediately, then hand the real work to a
+        # background thread.
+        status("Updating…", "gray")
+        threading.Thread(target=_do_update, daemon=True, name="wingvox-update").start()
+
     def _update_check():
         # Deliberately last and deliberately quiet. It waits for warm-up so
         # its pill doesn't stomp on "Ready", it never blocks startup, and a
         # failure (offline, no git, someone's own fork) is a log line rather
-        # than anything the user sees. Wingvox does not install the update
-        # itself -- pulling code onto someone's machine without them asking
-        # is not a thing this app does.
+        # than anything the user sees. Wingvox never pulls an update on its
+        # own -- only in direct response to the user clicking the pill (Mac)
+        # or running update.sh themselves (Windows, no click-to-update yet).
         warm_done.wait(180)
         time.sleep(5)  # let the "Ready" pill finish its own hide_after
         behind = pc.check_for_update()
         if behind:
             print(f"  Update available — run: {pc.update_command()}")
-            status("Update available — run ./update.sh in the Wingvox folder",
-                   "orange", hide_after=12)
+            if pc.IS_MAC:
+                status("Update available", "orange", hide_after=30,
+                       on_click=_handle_update_click)
+            else:
+                status("Update available — run ./update.sh in the Wingvox folder",
+                       "orange", hide_after=12)
         elif behind is False:
             print("  Up to date.")
         else:

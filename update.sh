@@ -24,6 +24,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
     git status --short --untracked-files=no >&2
     echo >&2
     echo "Updating would overwrite them. Commit or discard them first." >&2
+    echo "WINGVOX_RESULT:dirty"
     exit 1
 fi
 
@@ -33,6 +34,7 @@ AFTER="$(git rev-parse origin/HEAD 2>/dev/null || git rev-parse origin/main)"
 
 if [[ "$BEFORE" == "$AFTER" ]]; then
     echo "    Already up to date — nothing to do."
+    echo "WINGVOX_RESULT:up_to_date"
     exit 0
 fi
 
@@ -47,7 +49,13 @@ if ! git diff --quiet "$BEFORE" "$AFTER" -- requirements.txt setup.py stt_mac.py
 fi
 
 step "Updating"
-git pull --ff-only --quiet
+if ! git pull --ff-only --quiet; then
+    echo "Pull failed -- your local branch may have diverged from origin," >&2
+    echo "or the network dropped mid-pull. Run 'git status' in $REPO_DIR" >&2
+    echo "to see what's going on." >&2
+    echo "WINGVOX_RESULT:error:git pull failed"
+    exit 1
+fi
 echo "    Now at $(git rev-parse --short HEAD)."
 
 if [[ -n "$NEEDS_INSTALL" ]]; then
@@ -57,13 +65,16 @@ if [[ -n "$NEEDS_INSTALL" ]]; then
     echo
     echo "      $REPO_DIR/install.sh"
     echo
+    echo "WINGVOX_RESULT:needs_install"
     exit 0
 fi
 
 step "Restarting Wingvox"
 if launchctl kickstart -k "gui/$(id -u)/com.broganwilliams.wingvox" 2>/dev/null; then
+    echo "WINGVOX_RESULT:updated"
     echo "    Restarted. Give it a few seconds to reload the speech model."
 else
+    echo "WINGVOX_RESULT:error:not installed as a login service"
     echo "    Wingvox doesn't appear to be installed as a login service."
     echo "    Run $REPO_DIR/install.sh to set it up."
 fi

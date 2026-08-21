@@ -347,6 +347,37 @@ def check_for_update():
     return have_it is None
 
 
+def run_update() -> str:
+    """Run update.sh and report what happened, via its WINGVOX_RESULT marker
+    line: 'dirty', 'up_to_date', 'needs_install', 'updated', or
+    'error:<reason>'. Mac-only -- there's no click-to-update path on Windows
+    yet (a code update there needs a full PyInstaller rebuild, not just a
+    pull). Meant to be called from a background thread: this function only
+    ever blocks its caller, never raises, so the caller never needs to catch
+    anything -- a timeout, a missing script, or unexpected output all fold
+    into a plain 'error:...' string same as an actual failure would."""
+    if not IS_MAC:
+        return "error:not supported on this platform"
+    script = install_dir() / "update.sh"
+    if not script.exists():
+        return "error:update.sh not found"
+    try:
+        r = subprocess.run(
+            ["/bin/bash", str(script)],
+            cwd=str(install_dir()),
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return "error:timed out (slow network?)"
+    except Exception as e:
+        return f"error:{e}"
+    for line in reversed(r.stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("WINGVOX_RESULT:"):
+            return line[len("WINGVOX_RESULT:"):].strip()
+    return f"error:no result marker (exit {r.returncode})"
+
+
 # ---------- Windows: clear any stuck modifier before a simulated paste ----------
 
 def release_all_modifiers(kb) -> None:
