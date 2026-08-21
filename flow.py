@@ -889,6 +889,16 @@ def acquire_single_instance_lock() -> bool:
     return False
 
 
+# Two quick taps of the hotkey within this window toggle "locked" recording:
+# it keeps going with the key fully released, and a single follow-up press
+# (not another hold) stops it. Lets someone dictate hands-free for a long
+# passage instead of physically holding the key the whole time.
+DOUBLE_CLICK_WINDOW_SECONDS = 0.4
+# A press-release cycle at or under this length counts as a "tap" (the first
+# or second half of a double-click) rather than a deliberate hold-to-talk.
+TAP_MAX_SECONDS = 0.35
+
+
 def run():
     if not acquire_single_instance_lock():
         print("  ⚠ Wingvox is already running (another instance holds the lock). Exiting.")
@@ -952,6 +962,15 @@ def run():
         # whether the last dictation trailed off mid-sentence, when it finished,
         # and its last few words for context if the next dictation continues it.
         "mid_sentence": False, "last_end_time": 0.0, "tail": "",
+        # Double-click-to-lock tracking (see DOUBLE_CLICK_WINDOW_SECONDS):
+        # whether the current recording is hands-free (started by a double
+        # tap, stopped by a single press rather than a release), when the
+        # current press started, when the last quick tap was released, and
+        # whether to swallow repeat on_press events until the next release
+        # (guards against OS key-repeat while stopping a locked recording by
+        # holding instead of tapping).
+        "locked": False, "press_started_at": 0.0, "last_tap_release_time": 0.0,
+        "ignore_until_release": False,
     }
     finish_lock = threading.Lock()
 
@@ -985,6 +1004,13 @@ def run():
             time.sleep(0.15)
             if not state["recording"]:
                 return
+            if state["locked"]:
+                # A locked (double-click-toggled) recording keeps going with
+                # the physical key up almost the entire time by design -- the
+                # "key went up without an on_release" signal this watchdog
+                # exists to catch doesn't apply here at all. Only a press
+                # (handled in on_press) ends a locked recording.
+                continue
             if pc.is_hotkey_physically_down(hotkey_choice):
                 seen_down = True
             elif seen_down:
@@ -1109,17 +1135,38 @@ def run():
     def on_press(key):
         if key not in HOTKEY_KEYS:
             return
+        if state["ignore_until_release"]:
+            # Swallowing OS key-repeat from a hold that's stopping a locked
+            # recording (see the "single press to stop" branch below) --
+            # the matching on_release clears this once the key actually
+            # comes up.
+            return
         if not state["recording"]:
+            now = time.time()
+            # Two quick taps in a row -- the previous press+release was
+            # short enough to be a tap, and this press followed closely
+            # enough behind its release -- toggles into locked (hands-free)
+            # recording instead of the normal hold-to-talk kind.
+            state["locked"] = (now - state["last_tap_release_time"]) <= DOUBLE_CLICK_WINDOW_SECONDS
+            state["last_tap_release_time"] = 0.0  # consumed either way
+            state["press_started_at"] = now
             state["recording"] = True
-            print("  ● Recording…" if state["warm"] else
-                  "  ● Recording… (still loading, first paste will be slow)")
+            print(("  ● Recording… (tap again to stop)" if state["locked"] else "  ● Recording…")
+                  if state["warm"] else "  ● Recording… (still loading, first paste will be slow)")
             if overlay:
                 overlay.show_recording()
             recorder.start()
             threading.Thread(target=_release_watchdog, daemon=True).start()
-        # else: a repeat on_press while already recording. Windows
-        # auto-repeats a held key at the OS level (confirmed: ~10/sec), so
-        # this fires constantly for the entire duration of a normal hold --
+        elif state["locked"]:
+            # A press while a locked recording is already running is the
+            # "single press to stop" gesture -- stop right away rather than
+            # waiting for the release, and ignore any further on_press from
+            # OS key-repeat if this press turns into a hold instead of a tap.
+            state["ignore_until_release"] = True
+            _finish_recording("locked-stop-press")
+        # else: a repeat on_press while already recording hold-to-talk style.
+        # Windows auto-repeats a held key at the OS level (confirmed: ~10/sec),
+        # so this fires constantly for the entire duration of a normal hold --
         # it is not evidence of a missed release. Ignore it; _release_watchdog
         # or a genuine on_release is what actually ends the
         # recording.
@@ -1134,6 +1181,28 @@ def run():
     def on_release(key):
         if key not in HOTKEY_KEYS:
             return
+        if state["ignore_until_release"]:
+            state["ignore_until_release"] = False
+            return
+        if not state["recording"]:
+            # Already stopped -- e.g. the release half of the press that just
+            # stopped a locked recording in on_press.
+            return
+        if state["locked"]:
+            # Releasing the physical key must never itself stop a locked
+            # recording -- it's up almost the entire time by design. Only a
+            # subsequent press does (handled in on_press). This release just
+            # completed the tap that started it, or the tap that stopped it
+            # (already handled above via ignore_until_release/the recording
+            # already being over).
+            return
+        held = time.time() - state["press_started_at"]
+        if held <= TAP_MAX_SECONDS:
+            # A quick tap while not already locked -- arms double-click
+            # detection for the next press. (Also finishes this recording
+            # normally below; transcribe() already discards clips under 0.3s
+            # as accidental taps, so a lone tap costs nothing.)
+            state["last_tap_release_time"] = time.time()
         _finish_recording("on_release")
 
     def _guarded(name, fn):
