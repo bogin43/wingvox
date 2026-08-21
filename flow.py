@@ -889,13 +889,11 @@ def acquire_single_instance_lock() -> bool:
     return False
 
 
-# Two quick taps of the hotkey within this window toggle "locked" recording:
-# it keeps going with the key fully released, and a single follow-up press
-# (not another hold) stops it. Lets someone dictate hands-free for a long
-# passage instead of physically holding the key the whole time.
-DOUBLE_CLICK_WINDOW_SECONDS = 0.4
-# A press-release cycle at or under this length counts as a "tap" (the first
-# or second half of a double-click) rather than a deliberate hold-to-talk.
+# A press-release cycle at or under this length is a quick tap rather than a
+# deliberate hold-to-talk -- tapping locks recording on (it keeps going with
+# the key fully released) instead of stopping it, so someone can dictate a
+# long passage hands-free instead of physically holding the key the whole
+# time. A single follow-up press, not another tap, stops it.
 TAP_MAX_SECONDS = 0.35
 
 
@@ -962,15 +960,13 @@ def run():
         # whether the last dictation trailed off mid-sentence, when it finished,
         # and its last few words for context if the next dictation continues it.
         "mid_sentence": False, "last_end_time": 0.0, "tail": "",
-        # Double-click-to-lock tracking (see DOUBLE_CLICK_WINDOW_SECONDS):
-        # whether the current recording is hands-free (started by a double
-        # tap, stopped by a single press rather than a release), when the
-        # current press started, when the last quick tap was released, and
-        # whether to swallow repeat on_press events until the next release
-        # (guards against OS key-repeat while stopping a locked recording by
-        # holding instead of tapping).
-        "locked": False, "press_started_at": 0.0, "last_tap_release_time": 0.0,
-        "ignore_until_release": False,
+        # Tap-to-lock tracking (see TAP_MAX_SECONDS): whether the current
+        # recording is hands-free (started by a quick tap, stopped by a
+        # single press rather than a release), when the current press
+        # started, and whether to swallow repeat on_press events until the
+        # next release (guards against OS key-repeat while stopping a locked
+        # recording by holding instead of tapping).
+        "locked": False, "press_started_at": 0.0, "ignore_until_release": False,
     }
     finish_lock = threading.Lock()
 
@@ -1005,7 +1001,7 @@ def run():
             if not state["recording"]:
                 return
             if state["locked"]:
-                # A locked (double-click-toggled) recording keeps going with
+                # A locked (tap-toggled) recording keeps going with
                 # the physical key up almost the entire time by design -- the
                 # "key went up without an on_release" signal this watchdog
                 # exists to catch doesn't apply here at all. Only a press
@@ -1137,31 +1133,27 @@ def run():
             return
         if state["ignore_until_release"]:
             # Swallowing OS key-repeat from a hold that's stopping a locked
-            # recording (see the "single press to stop" branch below) --
-            # the matching on_release clears this once the key actually
-            # comes up.
+            # recording (see the "press to stop" branch below) -- the
+            # matching on_release clears this once the key actually comes up.
             return
         if not state["recording"]:
-            now = time.time()
-            # Two quick taps in a row -- the previous press+release was
-            # short enough to be a tap, and this press followed closely
-            # enough behind its release -- toggles into locked (hands-free)
-            # recording instead of the normal hold-to-talk kind.
-            state["locked"] = (now - state["last_tap_release_time"]) <= DOUBLE_CLICK_WINDOW_SECONDS
-            state["last_tap_release_time"] = 0.0  # consumed either way
-            state["press_started_at"] = now
+            # Starts recording either way -- whether this turns into a quick
+            # tap (locks hands-free) or a hold (stops on release, as always)
+            # is only decided in on_release, once we know which one it was.
+            state["locked"] = False
+            state["press_started_at"] = time.time()
             state["recording"] = True
-            print(("  ● Recording… (tap again to stop)" if state["locked"] else "  ● Recording…")
-                  if state["warm"] else "  ● Recording… (still loading, first paste will be slow)")
+            print("  ● Recording…" if state["warm"] else
+                  "  ● Recording… (still loading, first paste will be slow)")
             if overlay:
                 overlay.show_recording()
             recorder.start()
             threading.Thread(target=_release_watchdog, daemon=True).start()
         elif state["locked"]:
             # A press while a locked recording is already running is the
-            # "single press to stop" gesture -- stop right away rather than
-            # waiting for the release, and ignore any further on_press from
-            # OS key-repeat if this press turns into a hold instead of a tap.
+            # "press to stop" gesture -- stop right away rather than waiting
+            # for the release, and ignore any further on_press from OS
+            # key-repeat if this press turns into a hold instead of a tap.
             state["ignore_until_release"] = True
             _finish_recording("locked-stop-press")
         # else: a repeat on_press while already recording hold-to-talk style.
@@ -1191,18 +1183,18 @@ def run():
         if state["locked"]:
             # Releasing the physical key must never itself stop a locked
             # recording -- it's up almost the entire time by design. Only a
-            # subsequent press does (handled in on_press). This release just
-            # completed the tap that started it, or the tap that stopped it
-            # (already handled above via ignore_until_release/the recording
-            # already being over).
+            # subsequent press does (handled in on_press).
             return
         held = time.time() - state["press_started_at"]
         if held <= TAP_MAX_SECONDS:
-            # A quick tap while not already locked -- arms double-click
-            # detection for the next press. (Also finishes this recording
-            # normally below; transcribe() already discards clips under 0.3s
-            # as accidental taps, so a lone tap costs nothing.)
-            state["last_tap_release_time"] = time.time()
+            # A quick tap, not a hold -- lock in and keep recording
+            # hands-free instead of stopping. A single press later ends it
+            # (see on_press). No separate double-tap gesture needed, and
+            # nothing here can collide with another app's own global
+            # hotkey the way a double-tap binding can.
+            state["locked"] = True
+            status("● Recording… (press again to stop)")
+            return
         _finish_recording("on_release")
 
     def _guarded(name, fn):
