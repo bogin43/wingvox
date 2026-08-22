@@ -30,7 +30,15 @@ fi
 
 BEFORE="$(git rev-parse HEAD)"
 git fetch --quiet origin
-AFTER="$(git rev-parse origin/HEAD 2>/dev/null || git rev-parse origin/main)"
+# Not origin/HEAD: that's a local remote-tracking symref that only exists if
+# something has previously run `git remote set-head origin -a` (or an
+# equivalent clone-time step) for this checkout -- plenty of real checkouts
+# never get one. When it's missing, `git rev-parse origin/HEAD` doesn't just
+# fail cleanly: it can echo the literal string "origin/HEAD" to stdout before
+# failing, which then lands inside AFTER via the `||` fallback and produces
+# an unparseable two-line value. This repo's default branch is always main,
+# so skip the fragile fallback chain entirely.
+AFTER="$(git rev-parse origin/main)"
 
 if [[ "$BEFORE" == "$AFTER" ]]; then
     echo "    Already up to date — nothing to do."
