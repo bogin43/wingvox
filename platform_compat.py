@@ -175,6 +175,104 @@ def request_input_monitoring() -> None:
         pass
 
 
+def text_before_cursor(max_chars: int = 200):
+    """Best-effort read of the text immediately before the caret in
+    whatever text field is currently focused, via the Accessibility API.
+
+    Lets flow.py's process() decide whether a dictation is starting a
+    fresh sentence or continuing an unfinished one, and whether a space
+    needs to go in before it, from what's actually in the field instead
+    of guessing from Wingvox's own dictation history. This is a more
+    sensitive use of the same Accessibility trust already granted for the
+    paste keystroke (has_accessibility_access() above): it reads nearby
+    field text, not just simulates a key press.
+
+    Returns None whenever this can't be determined -- no focused element,
+    the focused control doesn't expose AX text attributes (some Electron/
+    canvas-based editors don't), or anything else goes wrong. Callers
+    must treat None as "unknown, fall back to your own heuristic", not as
+    "empty field" -- a false "empty" would wrongly skip a needed space or
+    wrongly capitalize a continuation."""
+    if not IS_MAC:
+        return None
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide, AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue, AXValueGetValue,
+            kAXFocusedUIElementAttribute, kAXFocusedWindowAttribute,
+            kAXValueAttribute, kAXSelectedTextRangeAttribute,
+            kAXValueCFRangeType, kAXWindowsAttribute,
+        )
+
+        def read_text_and_caret(element):
+            err, value = AXUIElementCopyAttributeValue(element, kAXValueAttribute, None)
+            if err or not isinstance(value, str):
+                return None
+            err, rng = AXUIElementCopyAttributeValue(
+                element, kAXSelectedTextRangeAttribute, None)
+            if err or rng is None:
+                return None
+            ok, cfrange = AXValueGetValue(rng, kAXValueCFRangeType, None)
+            if not ok:
+                return None
+            location = cfrange[0]
+            return value, location
+
+        system = AXUIElementCreateSystemWide()
+        err, focused = AXUIElementCopyAttributeValue(
+            system, kAXFocusedUIElementAttribute, None)
+        if err or focused is None:
+            # The system-wide element occasionally can't resolve this
+            # directly (observed during testing). Asking the frontmost
+            # app for its own focused element, rather than going through
+            # the system-wide proxy, is the more reliable path.
+            try:
+                from AppKit import NSWorkspace
+                pid = NSWorkspace.sharedWorkspace().frontmostApplication().processIdentifier()
+                app = AXUIElementCreateApplication(pid)
+                err, focused = AXUIElementCopyAttributeValue(
+                    app, kAXFocusedUIElementAttribute, None)
+                if err or focused is None:
+                    # Chromium (Chrome, Electron apps) builds its
+                    # accessibility tree lazily and won't answer even this
+                    # basic a query until something has asked it for more
+                    # than just the focused element -- confirmed by testing
+                    # against real Chrome. Asking for its windows is enough
+                    # to make it turn the tree on; the result isn't used,
+                    # only the side effect of having asked. Once triggered
+                    # this way it stays on for the rest of that app's run,
+                    # so this retry only actually does anything the first
+                    # time Wingvox meets a given Chromium app process.
+                    AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, None)
+                    err, focused = AXUIElementCopyAttributeValue(
+                        app, kAXFocusedUIElementAttribute, None)
+            except Exception:
+                focused = None
+            if err or focused is None:
+                return None
+
+        result = read_text_and_caret(focused)
+        if result is None:
+            # The focused element found above is sometimes a container
+            # (e.g. the window) rather than the text view actually
+            # holding the caret -- observed on a real app during testing.
+            # Try one level down before giving up.
+            err, window = AXUIElementCopyAttributeValue(
+                focused, kAXFocusedWindowAttribute, None)
+            if not err and window is not None:
+                err, deeper = AXUIElementCopyAttributeValue(
+                    window, kAXFocusedUIElementAttribute, None)
+                if not err and deeper is not None:
+                    result = read_text_and_caret(deeper)
+        if result is None:
+            return None
+
+        text, caret = result
+        return text[max(0, caret - max_chars):caret]
+    except Exception:
+        return None
+
+
 def restart_self() -> None:
     """Restart Wingvox through launchd.
 

@@ -1083,28 +1083,59 @@ def run():
         if not raw:
             status("Heard nothing", "gray", hide_after=2)
             return
-        # Only treat this as continuing the previous dictation's sentence if
-        # that one actually trailed off unfinished, and not so long ago that
-        # this is more likely an unrelated dictation into a different field.
-        continuing = (state["mid_sentence"]
+        # Prefer the real text sitting before the cursor over guessing from
+        # Wingvox's own dictation history -- it's right regardless of
+        # whether what's there was typed by hand or dictated, and doesn't
+        # depend on timing. Only fall back to the old history-based guess
+        # when that read isn't available (unsupported app, no focused
+        # field, anything else that can go wrong reading another app's UI).
+        context = pc.text_before_cursor()
+        if context is not None:
+            stripped = context.rstrip()
+            ends_sentence = _ends_sentence(context) if stripped else True
+            continuing = bool(stripped) and not ends_sentence
+            needs_space = bool(context) and context[-1] not in " \t\n"
+            tail = _tail_words(context) if continuing else ""
+        else:
+            # No AX read (unsupported app, or the app's own accessibility
+            # tree just doesn't expose usable text/selection -- true of some
+            # Electron apps even after the Chromium wake-up trick above).
+            # Fall back to guessing from Wingvox's own dictation history.
+            #
+            # Only treat this as continuing the previous dictation's sentence
+            # if that one actually trailed off unfinished, and not so long
+            # ago that this is more likely an unrelated dictation into a
+            # different field.
+            recent = (state["last_end_time"] > 0
                       and t0 - state["last_end_time"] < CONTINUATION_WINDOW_SECONDS)
-        tail = state["tail"] if continuing else ""
+            continuing = recent and state["mid_sentence"]
+            # We can't see the field, but if we pasted very recently, the
+            # cursor is almost certainly still sitting right where that
+            # paste left it -- with no trailing space of its own, since
+            # Wingvox never adds one. True whether or not that previous
+            # dictation finished its sentence: this is what fixes two full
+            # sentences dictated back to back in apps the AX read can't
+            # reach (a bare, no-selectable-text-field app like Terminal,
+            # or an Electron app whose accessibility tree stays dark).
+            needs_space = recent
+            tail = state["tail"] if continuing else ""
         status("Cleaning up…")
         try:
             cleaned = clean_text(raw, dictionary, continuation_tail=tail)
             t2 = time.time()
             if continuing:
                 cleaned = _decapitalize_start(cleaned, dictionary)
-                # Continuing text pastes right where the previous, unfinished
-                # dictation left off with no space of its own -- add the word
-                # boundary back, since the cleanup model only fixes mechanics
-                # inside the transcript, not the seam between two of them.
+            # Pastes right where the cursor sits, with no space of its own --
+            # add the word/sentence boundary back when the field doesn't
+            # already end in whitespace, since the cleanup model only fixes
+            # mechanics inside the transcript, not the seam before it.
+            if needs_space:
                 cleaned = " " + cleaned
             inject(cleaned)
             status(f"✓ {cleaned[:60]}", "green", hide_after=2)
         except Exception:
             t2 = time.time()
-            raw_to_paste = " " + raw if continuing else raw
+            raw_to_paste = " " + raw if needs_space else raw
             try:
                 inject(raw_to_paste)
             except Exception as inject_err:
