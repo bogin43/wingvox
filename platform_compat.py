@@ -332,6 +332,22 @@ def clipboard_get():
 
 def clipboard_set(text: str) -> None:
     if IS_MAC:
+        # pbcopy decodes its stdin using the subprocess's locale (LANG/
+        # LC_CTYPE) -- launchd gives this LaunchAgent no locale at all, so
+        # any non-ASCII character (the non-breaking space in inject(),
+        # "…" before its ASCII-dots replacement below) got silently
+        # mangled on the pasteboard, showing up as mojibake on paste.
+        # AppKit's NSPasteboard takes the string directly, no byte/locale
+        # decoding step to get wrong -- same class already used to read
+        # the clipboard in clipboard_get() above.
+        try:
+            from AppKit import NSPasteboard, NSPasteboardTypeString
+            board = NSPasteboard.generalPasteboard()
+            board.clearContents()
+            board.setString_forType_(text, NSPasteboardTypeString)
+            return
+        except Exception:
+            pass  # fall through to the subprocess path below
         subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
         return
     import pyperclip

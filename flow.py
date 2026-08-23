@@ -690,6 +690,40 @@ def _ends_sentence(text: str) -> bool:
     return t.endswith((".", "!", "?"))
 
 
+# Words no complete English sentence ends on. If the cleaned text's last
+# word is one of these, the cleanup model's own closing punctuation is
+# wrong -- the thought is still open no matter what it decided to close it
+# with. The local cleanup model is already known not to reliably follow
+# CONTINUATION_NOTE's ask not to capitalize a continuation (see
+# _decapitalize_start's docstring); this is the mirror-image mistake on
+# punctuation instead, seen when a sentence spans three or more dictations
+# instead of two -- the middle chunk reads as plausibly complete on its
+# own, so the model closes it early and the next chunk starts a "new"
+# sentence instead of continuing this one. Deterministic override instead
+# of trusting the model's guess, same reasoning as that fix.
+_DANGLING_WORDS = {
+    "a", "an", "the", "to", "of", "in", "on", "at", "for", "with", "by",
+    "from", "into", "onto", "about", "over", "under", "between", "through",
+    "during", "without", "within", "and", "but", "or", "so", "because",
+    "if", "that", "which", "who", "whose", "my", "your", "his", "her",
+    "its", "our", "their", "as", "than", "when", "while", "before", "after",
+    # Bare auxiliary/copula verbs -- "So what is", "I was", "we have" --
+    # occasionally complete a sentence on their own, but a dictation trailing
+    # off right after one is overwhelmingly someone mid-thought about the
+    # complement that comes next, not someone actually done talking.
+    "is", "are", "was", "were", "am", "be", "been", "being",
+    "do", "does", "did", "has", "have", "had",
+    "can", "could", "will", "would", "should", "shall", "may", "might", "must",
+}
+
+
+def _ends_mid_clause(text: str) -> bool:
+    """Whether `text` trails off on a word no complete sentence ends with,
+    regardless of what punctuation the cleanup model tacked on."""
+    words = re.findall(r"[A-Za-z']+", text)
+    return bool(words) and words[-1].lower() in _DANGLING_WORDS
+
+
 def _tail_words(text: str, n: int = 12) -> str:
     """Last few words of a cleaned dictation, given to the cleanup model as
     context when the next dictation continues it."""
@@ -1083,32 +1117,24 @@ def run():
         if not raw:
             status("Heard nothing", "gray", hide_after=2)
             return
-        # Prefer the real text sitting before the cursor over guessing from
-        # Wingvox's own dictation history -- it's right regardless of
-        # whether what's there was typed by hand or dictated, and doesn't
-        # depend on timing. Only fall back to the old history-based guess
-        # when that read isn't available (unsupported app, no focused
-        # field, anything else that can go wrong reading another app's UI).
-        context = pc.text_before_cursor()
-        if context is not None:
-            stripped = context.rstrip()
-            ends_sentence = _ends_sentence(context) if stripped else True
-            continuing = bool(stripped) and not ends_sentence
-            needs_space = bool(context) and context[-1] not in " \t\n"
-            tail = _tail_words(context) if continuing else ""
-        else:
-            # No AX read (unsupported app, or the app's own accessibility
-            # tree just doesn't expose usable text/selection -- true of some
-            # Electron apps even after the Chromium wake-up trick above).
-            # Fall back to guessing from Wingvox's own dictation history.
-            #
-            # Only treat this as continuing the previous dictation's sentence
-            # if that one actually trailed off unfinished, and not so long
-            # ago that this is more likely an unrelated dictation into a
-            # different field.
-            recent = (state["last_end_time"] > 0
-                      and t0 - state["last_end_time"] < CONTINUATION_WINDOW_SECONDS)
-            continuing = recent and state["mid_sentence"]
+        # Trust Wingvox's own recent dictation history first -- it's exact
+        # and doesn't depend on any app's accessibility support. The AX
+        # field read is flaky in Chrome/Electron (their accessibility tree
+        # only sometimes wakes up), and letting it override a correct
+        # recent-history signal with occasional garbage is what made bug
+        # fixes feel inconsistent instead of just not applying. Only ask
+        # the field what's there when we have no recent history of our own
+        # to go on -- e.g. resuming text typed by hand, or dictating again
+        # after a long enough gap that the field may have changed under us.
+        #
+        # Only treat this as continuing the previous dictation's sentence
+        # if that one actually trailed off unfinished, and not so long ago
+        # that this is more likely an unrelated dictation into a different
+        # field.
+        recent = (state["last_end_time"] > 0
+                  and t0 - state["last_end_time"] < CONTINUATION_WINDOW_SECONDS)
+        if recent:
+            continuing = state["mid_sentence"]
             # We can't see the field, but if we pasted very recently, the
             # cursor is almost certainly still sitting right where that
             # paste left it -- with no trailing space of its own, since
@@ -1119,23 +1145,46 @@ def run():
             # or an Electron app whose accessibility tree stays dark).
             needs_space = recent
             tail = state["tail"] if continuing else ""
+        else:
+            context = pc.text_before_cursor()
+            if context is not None:
+                stripped = context.rstrip()
+                ends_sentence = _ends_sentence(context) if stripped else True
+                continuing = bool(stripped) and not ends_sentence
+                needs_space = bool(context) and context[-1] not in " \t\n"
+                tail = _tail_words(context) if continuing else ""
+            else:
+                continuing = False
+                needs_space = False
+                tail = ""
         status("Cleaning up…")
         try:
             cleaned = clean_text(raw, dictionary, continuation_tail=tail)
+            # The cleanup model sometimes marks an unfinished thought with a
+            # trailing "..."/"…". Strip it from what actually gets pasted --
+            # the continuation blends on with no visible seam anyway, and
+            # _ends_sentence() below still reads the stripped text as
+            # unfinished (no terminal punctuation) either way.
+            cleaned = re.sub(r"(\.\.\.|…)\s*$", "", cleaned)
             t2 = time.time()
             if continuing:
                 cleaned = _decapitalize_start(cleaned, dictionary)
             # Pastes right where the cursor sits, with no space of its own --
             # add the word/sentence boundary back when the field doesn't
             # already end in whitespace, since the cleanup model only fixes
-            # mechanics inside the transcript, not the seam before it.
+            # mechanics inside the transcript, not the seam before it. A
+            # non-breaking space, not a plain one: some rich-text editors
+            # (seen in Gmail's compose box) collapse away a lone ordinary
+            # space landing right at a paste boundary -- a non-breaking one
+            # renders identically but isn't whitespace-collapsible, so it
+            # survives.
             if needs_space:
-                cleaned = " " + cleaned
+                cleaned = " " + cleaned
             inject(cleaned)
             status(f"✓ {cleaned[:60]}", "green", hide_after=2)
         except Exception:
             t2 = time.time()
-            raw_to_paste = " " + raw if needs_space else raw
+            raw_to_paste = " " + raw if needs_space else raw
             try:
                 inject(raw_to_paste)
             except Exception as inject_err:
@@ -1158,7 +1207,7 @@ def run():
                 status("⚠ Cleanup failed (is Ollama running?) — pasted raw transcript",
                        "orange", hide_after=6)
             cleaned = raw_to_paste
-        state["mid_sentence"] = not _ends_sentence(cleaned)
+        state["mid_sentence"] = not _ends_sentence(cleaned) or _ends_mid_clause(cleaned)
         state["last_end_time"] = time.time()
         state["tail"] = _tail_words(cleaned)
         print(f"  raw:   {raw}")
