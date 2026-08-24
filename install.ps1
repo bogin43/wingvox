@@ -27,7 +27,30 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 }
 Write-Host "    OK -- winget available."
 
-# ---------- 2. Python 3.12 (x64, specifically) ----------
+# ---------- 2. Visual C++ Redistributable ----------
+# onnxruntime (faster-whisper's VAD filter dependency, see stt_windows.py's
+# vad_filter=True) links against msvcp140_1.dll/vcruntime140_1.dll, which
+# ship in this redistributable, not in Windows itself. A machine that's
+# never had Visual-Studio-built software installed on it won't have these:
+# confirmed on a fresh Windows box where onnxruntime failed to import with
+# "DLL load failed" even though everything upstream of it -- Python, pip,
+# faster-whisper's own install -- succeeded without a single error. That
+# failure only surfaces the first time Wingvox actually tries to transcribe
+# something, well after this script has already said "install complete", so
+# install it here where a failure is visible and attributable.
+Step "Checking for the Visual C++ Redistributable"
+if (Test-Path "$env:WINDIR\System32\msvcp140_1.dll") {
+    Write-Host "    OK -- already installed."
+} else {
+    Write-Host "    Not found -- installing via winget."
+    winget install --id Microsoft.VCRedist.2015+.x64 -e --source winget --accept-package-agreements --accept-source-agreements
+    if (-not (Test-Path "$env:WINDIR\System32\msvcp140_1.dll")) {
+        Write-Error "Visual C++ Redistributable install didn't produce msvcp140_1.dll. Install it manually from https://aka.ms/vs/17/release/vc_redist.x64.exe and re-run this script."
+        exit 1
+    }
+}
+
+# ---------- 3. Python 3.12 (x64, specifically) ----------
 Step "Checking for Python 3.12 (x64)"
 # faster-whisper's ctranslate2 dependency doesn't publish Windows ARM64
 # wheels -- only win_amd64. On an ARM64 Windows machine (Surface Pro X/
@@ -64,7 +87,7 @@ if (-not $pythonOk) {
 $PythonBin = "py"
 $PythonArgs = @("-3.12-64")
 
-# ---------- 3. Ollama ----------
+# ---------- 4. Ollama ----------
 Step "Checking for Ollama"
 if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
     Write-Host "    Not found -- installing via winget."
@@ -116,11 +139,11 @@ if (-not $ollamaReady) {
     exit 1
 }
 
-# ---------- 4. Pull the cleanup model ----------
+# ---------- 5. Pull the cleanup model ----------
 Step "Pulling the qwen2.5:3b cleanup model (this may take a while on first run)"
 ollama pull qwen2.5:3b
 
-# ---------- 5. Python virtual environment ----------
+# ---------- 6. Python virtual environment ----------
 Step "Setting up the Python environment"
 $VenvDir = Join-Path $RepoDir "venv"
 if (-not (Test-Path $VenvDir)) {
@@ -135,7 +158,7 @@ Step "Installing Python dependencies"
 & $VenvPy -m pip install --upgrade pip -q
 & $VenvPy -m pip install -r requirements.txt -q
 
-# ---------- 5b. Pre-download the Whisper model ----------
+# ---------- 6b. Pre-download the Whisper model ----------
 # faster-whisper fetches its weights lazily on first use. Left alone, that
 # download (~1GB for small.en) happens on the very first launch instead --
 # after this script has already said "install complete" -- so Wingvox sits
@@ -148,7 +171,7 @@ Step "Installing Python dependencies"
 # stt_windows.py silently pre-downloads the wrong weights, and the first
 # launch downloads all over again -- the exact delay this step exists to
 # remove. install.sh reads stt_mac.WHISPER_REPO the same way.
-Step "Downloading the speech model (about 1GB -- one time)"
+Step "Downloading the speech model (about 0.5GB -- one time)"
 & $VenvPy -c @"
 import stt_windows
 from faster_whisper import WhisperModel
@@ -162,7 +185,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "    but the first dictation will be slow. Check your connection."
 }
 
-# ---------- 6. Default glossary ----------
+# ---------- 7. Default glossary ----------
 Step "Setting up dictionary.txt"
 $DataDir = Join-Path $env:LOCALAPPDATA "Wingvox"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
@@ -175,7 +198,7 @@ if (-not (Test-Path $DictPath)) {
     Write-Host "    dictionary.txt already exists, leaving it as-is."
 }
 
-# ---------- 7. Build Wingvox.exe ----------
+# ---------- 8. Build Wingvox.exe ----------
 Step "Building Wingvox.exe"
 Remove-Item -Recurse -Force (Join-Path $RepoDir "build") -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $RepoDir "dist") -ErrorAction SilentlyContinue
@@ -187,25 +210,62 @@ if (-not (Test-Path $ExePath)) {
 }
 Write-Host "    Built $ExePath"
 
-# ---------- 8. Background task ----------
+# ---------- 9. Background task ----------
 Step "Installing the background task"
-$TaskXmlTemplate = Join-Path $RepoDir "wingvox_task.xml.template"
-$TaskXmlPath = Join-Path $RepoDir "wingvox_task.xml"
-$TaskXmlContent = (Get-Content $TaskXmlTemplate -Raw) `
-    -replace "__EXE_PATH__", $ExePath `
-    -replace "__REPO_DIR__", $RepoDir
-# schtasks' XML importer wants UTF-16 specifically -- both UTF-8 with a BOM
-# ("incorrect document syntax") and UTF-8 without one ("unable to switch the
-# encoding") were rejected. Match the template's declared encoding exactly.
-[System.IO.File]::WriteAllText($TaskXmlPath, $TaskXmlContent, [System.Text.Encoding]::Unicode)
-
-# /delete legitimately "fails" (no existing task) on a first-ever install --
-# $ErrorActionPreference = "Stop" turns that expected stderr output into a
-# terminating error unless it's caught explicitly.
-try { schtasks /delete /tn Wingvox /f 2>$null | Out-Null } catch {}
-schtasks /create /tn Wingvox /xml $TaskXmlPath /f | Out-Null
-schtasks /run /tn Wingvox | Out-Null
-Write-Host "    Wingvox will now start automatically every time you log in."
+# Registering a *new* Task Scheduler task via `schtasks /create /xml` fails
+# with "Access is denied" on a real (non-elevated) admin-account Windows
+# session, which every default single-user Windows install is -- confirmed
+# by reproducing it directly, and confirmed that adding an explicit
+# <UserId> to the task XML does NOT fix it either. The denial happens on
+# schtasks.exe's own XML-import path specifically. Register-ScheduledTask
+# (the newer Task Scheduler API, via CIM/WMI rather than schtasks.exe's XML
+# importer) registers the identical task with no elevation prompt at all --
+# confirmed working on the same machine, same account, same task
+# definition. That's the actual fix, not a fallback: use the cmdlet, not
+# schtasks/xml. It also throws a real terminating PowerShell exception on
+# failure instead of a discarded stderr string, so a failure here can't
+# silently read as success the way the old schtasks-based version did.
+# A task last (re-)created through an elevated path -- e.g. an older
+# Wingvox version's schtasks/xml-plus-UAC-retry install, or anything else
+# that happened to touch it while elevated -- can end up needing elevation
+# to unregister too, even though creating a brand-new task with this
+# script's own Register-ScheduledTask call never does. Confirmed directly:
+# Unregister-ScheduledTask on such a task fails with "Access is denied",
+# and swallowing that silently (the previous behavior here) meant the
+# subsequent Register-ScheduledTask failed too, with a confusing "Cannot
+# create a file when that file already exists" -- the real cause (a
+# leftover task blocking the new one) was invisible. Retry the removal
+# once, elevated, rather than leaving that failure silent.
+try {
+    Unregister-ScheduledTask -TaskName Wingvox -Confirm:$false -ErrorAction Stop
+} catch {
+    if (Get-ScheduledTask -TaskName Wingvox -ErrorAction SilentlyContinue) {
+        Write-Host "    Removing an old version of the task needs administrator approval -- a Windows prompt is coming."
+        Start-Process powershell -ArgumentList @(
+            "-NoProfile", "-Command",
+            "Unregister-ScheduledTask -TaskName Wingvox -Confirm:`$false"
+        ) -Verb RunAs -Wait -WindowStyle Hidden
+    }
+}
+try {
+    $userId = "$env:USERDOMAIN\$env:USERNAME"
+    $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $RepoDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -Priority 7 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName Wingvox -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings `
+        -Description "Wingvox push-to-talk dictation background service" -ErrorAction Stop | Out-Null
+    Start-ScheduledTask -TaskName Wingvox
+    Write-Host "    Wingvox will now start automatically every time you log in."
+} catch {
+    Write-Host "    WARNING: couldn't register the background task ($($_.Exception.Message))."
+    Write-Host "    Wingvox is built but won't start automatically at login. Run this"
+    Write-Host "    script again, or launch it by hand each time from: $ExePath"
+}
 
 # ---------- Done ----------
 Step "Install complete"

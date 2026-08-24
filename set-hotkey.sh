@@ -1,7 +1,7 @@
 #!/bin/bash
-# Change which Option key starts dictation, without needing to know the
-# venv path or the launchctl restart command by heart. Wraps
-# `flow.py set-hotkey` (which only writes the setting) and the restart it
+# Change the dictation hotkey, without needing to know the venv path or the
+# launchctl restart command by heart. Wraps `flow.py set-hotkey` (which taps
+# the interactive picker, then only writes the setting) and the restart it
 # requires into one command, so this is the thing to hand a member who asks
 # to switch keys rather than the two raw commands underneath it.
 set -euo pipefail
@@ -15,20 +15,12 @@ if [[ ! -x "$VENV_PY" ]]; then
     exit 1
 fi
 
-CHOICE="${1:-}"
-if [[ "$CHOICE" != "right" && "$CHOICE" != "left" ]]; then
-    echo "Usage: ./set-hotkey.sh right|left"
-    echo
-    "$VENV_PY" "$REPO_DIR/flow.py" set-hotkey "" 2>/dev/null || true
-    exit 0
-fi
-
-# flow.py set-hotkey only writes hotkey.txt and prints the restart command
-# rather than running it -- keeping the file-write and the restart as
-# separate concerns there. This script exists specifically to fold both
-# into one step, so run it here instead of asking the user to copy the
-# command flow.py prints.
-"$VENV_PY" "$REPO_DIR/flow.py" set-hotkey "$CHOICE"
+# flow.py set-hotkey shows the tap-to-pick+confirm UI, then only writes
+# hotkey.txt and prints the restart command rather than running it --
+# keeping the file-write and the restart as separate concerns there. This
+# script exists specifically to fold both into one step, so run it here
+# instead of asking the user to copy the command flow.py prints.
+"$VENV_PY" "$REPO_DIR/flow.py" set-hotkey
 
 echo
 echo "Restarting Wingvox…"

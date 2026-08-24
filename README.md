@@ -2,9 +2,10 @@
 
 **Website:** [bogin43.github.io/wingvox](https://bogin43.github.io/wingvox/)
 
-Fully offline voice dictation. Hold the dictation hotkey (**Right Option** on
-Mac, **Right Alt** on Windows), speak, release. Cleaned-up text is pasted
-wherever your cursor is focused.
+Fully offline voice dictation. Hold the dictation hotkey (you pick which key
+the first time Wingvox runs -- **Right Option** on Mac / **Right Alt** on
+Windows is a reasonable choice if you're not sure), speak, release.
+Cleaned-up text is pasted wherever your cursor is focused.
 
 Pipeline: mic -> Whisper (mlx-whisper on Apple Silicon Mac, faster-whisper on
 Intel Mac and Windows) -> Ollama qwen2.5:3b cleanup -> clipboard + paste.
@@ -63,16 +64,28 @@ any time to add it.
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.
 
-The dictation hotkey defaults to **Right Option**. To switch to **Left
-Option** (or back), run from the Wingvox folder:
+The first time Wingvox runs, it asks you to tap whatever key you'd like to
+use as the dictation hotkey (Right Option/Right Alt is a reasonable default
+if you're not sure), then shows what it caught and asks you to confirm
+before saving it -- so an accidental tap can't silently become the hotkey.
+To change it later, run from the Wingvox folder:
 
 ```bash
-./set-hotkey.sh left    # or: right
+./set-hotkey.sh
 ```
 
-Left Option isn't offered as the default because it prefixes real system
-shortcuts (Option+drag, Option+click, Option+Space for the dictionary
-lookup) -- those start a recording instead while Wingvox is running.
+On Windows, use `set-hotkey.cmd` instead -- `set-hotkey.sh` is a bash script
+that won't run there:
+
+```powershell
+.\set-hotkey.cmd
+```
+
+Picking **Left Option/Alt** comes with a heads-up: it prefixes real system
+shortcuts (Option+drag, Option+click, Option+Space for the dictionary lookup
+on Mac; Alt+Tab, Alt+F4 on Windows) -- those start a recording instead while
+Wingvox is running. Picking an ordinary letter/number key comes with a
+similar note: every normal press of it anywhere starts a recording too.
 
 Wingvox dictates in **English** by default. To dictate in another language,
 run from the Wingvox folder:
@@ -81,12 +94,19 @@ run from the Wingvox folder:
 ./set-language.sh fr   # French. Also: nl (Dutch, covers Flemish), es, de, pt, it, ...
 ```
 
+On Windows, use `set-language.cmd` instead (same arguments) -- `set-language.sh`
+is a bash script that looks for the Mac venv layout and won't run there:
+
+```powershell
+.\set-language.cmd fr
+```
+
 Whisper handles ~100 languages; the few named above are just the ones
 that print a friendly name. Any other ISO 639-1 code works too. Flemish
 has no separate code of its own -- it's transcribed as Dutch (`nl`), same
-written standard as Netherlands Dutch. Windows note: the default speech
-model is English-only, so this needs `WINGVOX_WHISPER_MODEL=small` set by
-hand too; `./set-language.sh` says so if you try it there.
+written standard as Netherlands Dutch. On Windows, this also switches the
+speech model from the English-only default to a multilingual one
+automatically.
 
 To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
 you when there's something to take; it never installs anything on its own.

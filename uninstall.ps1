@@ -72,12 +72,12 @@ Write-Host "    Removed 'Wingvox-Ollama' (the auto-start entry, not Ollama itsel
 # ---------- 3. Built app ----------
 Step "Removing the built app"
 $leftovers = @()
-foreach ($item in @("dist", "build", "wingvox_task.xml")) {
+foreach ($item in @("dist", "build")) {
     $path = Join-Path $RepoDir $item
     if (-not (Remove-Stubbornly $path)) { $leftovers += $path }
 }
 if ($leftovers.Count -eq 0) {
-    Write-Host "    Removed dist\, build\, and the generated task XML."
+    Write-Host "    Removed dist\ and build\."
 } else {
     Write-Host "    Removed what it could, but these are still in use:"
     $leftovers | ForEach-Object { Write-Host "      $_" }

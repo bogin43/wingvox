@@ -10,7 +10,7 @@ Usage:
   python flow.py test-inject "hello"            paste text into focused app in 3s
   python flow.py add-correction "wrong text" "right text"   fix a recurring mis-transcription
   python flow.py check-update  see whether a newer version has been published
-  python flow.py set-hotkey right|left   choose the Option key that starts dictation (Mac only)
+  python flow.py set-hotkey   tap the key you'd like to use to start dictation
   python flow.py set-language fr   dictate in a language other than English (e.g. fr, nl for Dutch/Flemish)
 """
 
@@ -24,6 +24,7 @@ import time
 import types
 from pathlib import Path
 
+import hotkey_picker
 import notice
 import platform_compat as pc
 
@@ -72,6 +73,14 @@ else:
 WINGVOX_VERSION = "0.1.0"
 
 SAMPLE_RATE = 16000
+
+# Below this, a recording is a mis-tap (hotkey released before any speech
+# could register) rather than genuine silence -- process() checks this
+# directly, distinctly from transcribe()'s own identical check, so the two
+# cases can show the user different, actionable messages instead of both
+# collapsing into an unhelpful "Heard nothing" that sends someone chasing a
+# microphone-permission problem that was never the issue.
+MIN_AUDIO_SECONDS = 0.3
 
 # Longest single dictation to keep, in samples. Past this the recorder stops
 # accumulating rather than growing without bound (see Recorder._callback).
@@ -249,20 +258,61 @@ def load_dictionary() -> str:
     return ""
 
 
-def load_hotkey_choice() -> str:
-    """"right" or "left" -- which physical Option key starts dictation.
-    Windows ignores this; only Mac offers a choice today. Defaults to
-    "right", Wingvox's original hotkey, so a machine with no hotkey.txt at
-    all (every install before this feature existed) behaves exactly as it
-    always has."""
-    if not pc.IS_MAC or not HOTKEY_PATH.exists():
-        return "right"
-    choice = HOTKEY_PATH.read_text(encoding="utf-8").strip().lower()
-    return "left" if choice == "left" else "right"
+def _default_hotkey_key():
+    """Wingvox's known-good default: Right Option on Mac, Right Alt on
+    Windows -- unchanged from before the picker existed."""
+    return pc.mac_hotkey_keys("right")[0] if pc.IS_MAC else keyboard.Key.alt_r
 
 
-def save_hotkey_choice(choice: str) -> None:
-    HOTKEY_PATH.write_text(f"{choice}\n", encoding="utf-8")
+def _hotkey_key_to_token(key) -> str:
+    """Serializes a pynput Key enum member or KeyCode into one line of
+    hotkey.txt. Two forms: "key:<name>" for an enum member (alt_r, ctrl_r,
+    ...), "code:vk=<n>,char=<c>" for an arbitrary KeyCode (a plain letter/
+    digit/symbol the picker captured) -- vk drives matching, char is kept
+    alongside purely so the file stays human-debuggable."""
+    if isinstance(key, keyboard.Key):
+        return f"key:{key.name}"
+    vk = key.vk if key.vk is not None else ""
+    char = key.char or ""
+    return f"code:vk={vk},char={char}"
+
+
+def token_to_hotkey_key(token: str):
+    """Inverse of _hotkey_key_to_token, plus backward compatibility with the
+    original Mac-only "left"/"right" format. Returns None for anything that
+    doesn't parse -- callers treat that as "corrupted, use the default"."""
+    token = token.strip()
+    if token in ("left", "right"):
+        return pc.mac_hotkey_keys(token)[0]
+    if token.startswith("key:"):
+        return getattr(keyboard.Key, token[4:], None)
+    if token.startswith("code:"):
+        parts = dict(p.split("=", 1) for p in token[5:].split(",") if "=" in p)
+        vk = int(parts["vk"]) if parts.get("vk") else None
+        char = parts.get("char") or None
+        return keyboard.KeyCode(vk=vk, char=char) if (vk is not None or char) else None
+    return None
+
+
+def load_hotkey(grandfathered: bool):
+    """The configured dictation hotkey as a pynput Key/KeyCode, or None to
+    signal "no hotkey.txt yet -- show the picker".
+
+    grandfathered distinguishes a genuine first run (show the picker) from
+    an upgrade of an existing install that predates the picker (silently
+    keep behaving exactly as it always has) -- both have no hotkey.txt.
+    Pass notice.AGREED_PATH.exists(), captured *before* calling
+    notice.check() (which creates that file the moment a first-timer
+    agrees) -- an existing install already has it; a genuine first run
+    doesn't yet."""
+    if not HOTKEY_PATH.exists():
+        return _default_hotkey_key() if grandfathered else None
+    key = token_to_hotkey_key(HOTKEY_PATH.read_text(encoding="utf-8"))
+    return key if key is not None else _default_hotkey_key()
+
+
+def save_hotkey(key) -> None:
+    HOTKEY_PATH.write_text(_hotkey_key_to_token(key) + "\n", encoding="utf-8")
 
 
 def load_language_choice() -> str:
@@ -531,7 +581,7 @@ def apply_corrections(text: str, corrections: list) -> str:
 
 
 def transcribe(audio: np.ndarray, dictionary: str, corrections: list = (), language: str = "en") -> str:
-    if len(audio) < SAMPLE_RATE * 0.3:  # <0.3s: ignore accidental taps
+    if len(audio) < SAMPLE_RATE * MIN_AUDIO_SECONDS:  # ignore accidental taps
         return ""
     if float(np.sqrt(np.mean(audio**2))) < 0.001:  # silence: whisper would hallucinate
         return ""
@@ -941,21 +991,10 @@ def run():
     print(f"  Wingvox {WINGVOX_VERSION} starting ({platform.system()})")
     dictionary = load_dictionary()
     corrections = load_corrections()
-    hotkey_choice = load_hotkey_choice()
     language_choice = load_language_choice()
     if language_choice != "en":
         lang_name = KNOWN_LANGUAGES.get(language_choice, language_choice)
         print(f"  Language set to {lang_name} ({language_choice})")
-    if pc.IS_MAC:
-        HOTKEY_KEYS = pc.mac_hotkey_keys(hotkey_choice)
-        HOTKEY_LABEL = pc.MAC_HOTKEY_LABELS[hotkey_choice]
-        if hotkey_choice == "left":
-            print("  ⚠ Left Option is the dictation hotkey — Option+drag, Option+click "
-                  "and Option+Space (dictionary lookup) will start a recording instead "
-                  "while Wingvox is running.")
-    else:
-        HOTKEY_KEYS = pc.HOTKEY_KEYS
-        HOTKEY_LABEL = "Right Alt"
     print("  Requesting microphone access…")
     if not ensure_microphone_access():
         if pc.IS_MAC:
@@ -987,11 +1026,34 @@ def run():
 
     mac_permission_flow(status)
 
+    # Captured before notice.check() -- that call creates AGREED_PATH the
+    # moment a first-timer agrees, so checking afterward would always read
+    # True and this install could never be told apart from a genuine first
+    # run (see load_hotkey()'s grandfathered param).
+    notice_already_agreed = notice.AGREED_PATH.exists()
+
     # Before the hotkey listener exists, so "must acknowledge before use" is
     # enforced by there being nothing to press yet rather than by a flag some
     # other code path could forget to check.
     if not notice.check(status):
         sys.exit(0)
+
+    hotkey_key = load_hotkey(grandfathered=notice_already_agreed)
+    if hotkey_key is None:
+        # Genuinely no hotkey.txt on a fresh install (not an upgrade) --
+        # ask them to tap the key they want, rather than silently defaulting
+        # and leaving them to discover Right Alt/Right Option by accident.
+        hotkey_key = hotkey_picker.run(status)
+        save_hotkey(hotkey_key)
+    HOTKEY_KEYS = pc.hotkey_keys_for(hotkey_key)
+    if pc.IS_MAC and hotkey_key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
+        HOTKEY_LABEL = pc.MAC_HOTKEY_LABELS["left" if hotkey_key == keyboard.Key.alt_l else "right"]
+    else:
+        HOTKEY_LABEL = pc.key_label(hotkey_key)
+    if pc.IS_MAC and hotkey_key == keyboard.Key.alt_l:
+        print("  ⚠ Left Option is the dictation hotkey — Option+drag, Option+click "
+              "and Option+Space (dictionary lookup) will start a recording instead "
+              "while Wingvox is running.")
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
     state = {
@@ -1047,7 +1109,7 @@ def run():
                 # exists to catch doesn't apply here at all. Only a press
                 # (handled in on_press) ends a locked recording.
                 continue
-            if pc.is_hotkey_physically_down(hotkey_choice):
+            if pc.is_hotkey_physically_down(hotkey_key):
                 seen_down = True
             elif seen_down:
                 print("  [key] watchdog: physical key up, on_release never fired -- finishing recording")
@@ -1107,6 +1169,17 @@ def run():
 
     def process(audio: np.ndarray):
         t0 = time.time()
+        if len(audio) < SAMPLE_RATE * MIN_AUDIO_SECONDS:
+            # A tap released before any real speech could be captured --
+            # distinct from transcribe()'s own identical length check below,
+            # which folds this same case into an indistinguishable "" right
+            # alongside genuine silence. Caught here, before transcribe()
+            # even runs, so the message can point at the actual mistake
+            # (release timing) instead of sending someone to check
+            # microphone permissions that were never the problem.
+            status("Too short — hold the key while you speak, then release",
+                   "gray", hide_after=4)
+            return
         status("Transcribing…")
         try:
             raw = transcribe(audio, dictionary, corrections, language_choice)
@@ -1253,8 +1326,9 @@ def run():
         # returning False as "stop listening entirely" (raises
         # StopException), not "suppress this one event". It silently killed
         # the whole global hotkey after the very first press on every
-        # Windows run. Real selective suppression is wired up below via
-        # win32_event_filter/suppress_event on the Listener itself.
+        # Windows run. Suppression is handled a different way now -- see
+        # pc.make_alt_suppressing_event_filter, wired in where the Listener
+        # is constructed below -- which is why nothing needs to happen here.
 
     def on_release(key):
         if key not in HOTKEY_KEYS:
@@ -1310,18 +1384,6 @@ def run():
                 status(f"⚠ {name} error: {e}", "orange", hide_after=6)
         return wrapper
 
-    # NOTE: previously tried suppressing the Alt ribbon-hint overlay here via
-    # win32_event_filter + listener.suppress_event(). Turns out
-    # suppress_event() works by *raising an exception*
-    # (SystemHook.SuppressException) that unwinds pynput's event processing
-    # for that message right there -- it doesn't just block OS-level
-    # propagation, it also aborts before on_press/on_release are ever
-    # called. That made suppressing the Alt key indistinguishable from the
-    # hotkey not working at all. The ribbon-hint flicker is cosmetic;
-    # dropped rather than risk breaking the hotkey again. If it's worth
-    # fixing later, it needs the recording start/stop logic run from
-    # *inside* the filter itself (before raising suppress_event), not a
-    # separate on_press/on_release pair.
     warm_done = threading.Event()
 
     def _warm_up_then_signal():
@@ -1382,8 +1444,12 @@ def run():
                 status("Update available", "orange", hide_after=30,
                        on_click=_handle_update_click)
             else:
-                status("Update available — run ./update.sh in the Wingvox folder",
-                       "orange", hide_after=12)
+                # Was hardcoded to the Mac instruction here (drifting from
+                # the platform-aware command already logged above) --
+                # pc.update_command() is the single source of truth for
+                # both, precisely so they can't disagree again.
+                status(f"Update available — {pc.update_command()}",
+                       "orange", hide_after=15)
         elif behind is False:
             print("  Up to date.")
         else:
@@ -1391,10 +1457,31 @@ def run():
 
     threading.Thread(target=_warm_up_then_signal, daemon=True).start()
     threading.Thread(target=_update_check, daemon=True).start()
-    listener = keyboard.Listener(
-        on_press=_guarded("on_press", on_press),
-        on_release=_guarded("on_release", on_release),
-    )
+
+    guarded_on_press = _guarded("on_press", on_press)
+    guarded_on_release = _guarded("on_release", on_release)
+    listener_kwargs = dict(on_press=guarded_on_press, on_release=guarded_on_release)
+
+    hotkey_vk = pc.key_vk(hotkey_key) if pc.IS_WINDOWS else None
+    if pc.IS_WINDOWS and hotkey_vk is not None and pc.is_alt_family_vk(hotkey_vk):
+        # A bare Alt-family hotkey (Left or Right Alt) trips Windows' native
+        # menu-access-mode reflex on tap+release -- the same thing that
+        # highlights Notepad's File menu when you tap Alt alone -- which
+        # silently swallows the Ctrl+V paste that lands seconds later while
+        # the focused window is still in that state. Confirmed via live
+        # repro (SendInput + GetGUIThreadInfo's GUI_INMENUMODE flag +
+        # WM_GETTEXT, not clipboard round-tripping, which gives false
+        # positives) against real Notepad. See
+        # pc.make_alt_suppressing_event_filter's docstring for why this has
+        # to run the state machine from inside the filter itself instead of
+        # a separate on_press/on_release pair -- an earlier attempt at
+        # exactly that silently killed the whole hotkey instead of just
+        # suppressing the ribbon-hint flicker it was going after.
+        listener_kwargs["win32_event_filter"] = pc.make_alt_suppressing_event_filter(
+            hotkey_vk, guarded_on_press, guarded_on_release, lambda: listener
+        )
+
+    listener = keyboard.Listener(**listener_kwargs)
     listener.start()
 
     def _watch_listener():
@@ -1455,9 +1542,10 @@ def cmd_set_language(code: str):
     save_language_choice(code)
     name = KNOWN_LANGUAGES.get(code, code)
     print(f"Language set to {name} ({code}). Takes effect on next restart.")
-    if not pc.IS_MAC:
-        print("Windows note: the default speech model (small.en) is English-only.")
-        print("Set WINGVOX_WHISPER_MODEL=small (drop the .en) for this to actually take effect.")
+    if not pc.IS_MAC and code != "en":
+        print("Windows note: this switches the speech model to a multilingual one")
+        print("(from the English-only default) -- if it isn't already cached, the next")
+        print("restart downloads it, so the first dictation after that will be slow.")
     if code not in KNOWN_LANGUAGES:
         print(f"Note: {code!r} isn't in Wingvox's short list of known codes -- if this")
         print("isn't a real Whisper/ISO 639-1 language code, transcription will be wrong.")
@@ -1501,23 +1589,28 @@ def cmd_add_correction(wrong: str, right: str):
     print(f"Added: {wrong!r} -> {right!r}. Takes effect on next restart.")
 
 
-def cmd_set_hotkey(choice: str):
-    if not pc.IS_MAC:
-        print("The hotkey isn't user-selectable on Windows yet -- always Right Alt.")
-        return
-    choice = choice.strip().lower()
-    if choice not in ("right", "left"):
-        print('Usage: flow.py set-hotkey right|left')
-        print(f"Currently: {pc.MAC_HOTKEY_LABELS[load_hotkey_choice()]}")
-        return
-    save_hotkey_choice(choice)
-    print(f"Hotkey set to {pc.MAC_HOTKEY_LABELS[choice]}. Takes effect on next restart:")
-    print(f"  launchctl kickstart -k gui/$(id -u)/com.broganwilliams.wingvox")
-    if choice == "left":
+def cmd_set_hotkey():
+    print("Tap the key you'd like to use to start dictation…")
+    key = hotkey_picker.run()
+    save_hotkey(key)
+    label = (pc.MAC_HOTKEY_LABELS["left" if key == keyboard.Key.alt_l else "right"]
+              if pc.IS_MAC and key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
+              else pc.key_label(key))
+    print(f"Hotkey set to {label}. Takes effect on next restart:")
+    if pc.IS_MAC:
+        print("  launchctl kickstart -k gui/$(id -u)/com.broganwilliams.wingvox")
+    else:
+        print("  Run wingvox-off.cmd, then wingvox-on.cmd")
+    if key == keyboard.Key.alt_l:
         print()
-        print("Note: Left Option prefixes several system shortcuts (Option+drag,")
-        print("Option+click, Option+Space for the dictionary lookup). Those will")
-        print("start a recording instead while Wingvox is running.")
+        print("Note: Left Option/Alt prefixes several system shortcuts (Option+drag,")
+        print("Option+click, Option+Space for the dictionary lookup on Mac; Alt+Tab,")
+        print("Alt+F4 on Windows). Those will start a recording instead while Wingvox")
+        print("is running.")
+    elif not isinstance(key, keyboard.Key) and key.char:
+        print()
+        print(f"Note: {key.char!r} is also used for normal typing -- every press of it")
+        print("anywhere will start a recording while Wingvox is running.")
 
 
 if __name__ == "__main__":
@@ -1533,7 +1626,7 @@ if __name__ == "__main__":
     elif args[0] == "check-update":
         cmd_check_update()
     elif args[0] == "set-hotkey":
-        cmd_set_hotkey(args[1] if len(args) > 1 else "")
+        cmd_set_hotkey()
     elif args[0] == "set-language":
         cmd_set_language(args[1] if len(args) > 1 else "")
     elif args[0] == "add-correction":

@@ -7,12 +7,42 @@ run_model() differs from stt_mac's."""
 import os
 import threading
 
+import platform_compat as pc
+
+
+def _configured_language() -> str:
+    """Whisper language code from language.txt, or "en" if unset/missing.
+
+    Duplicates the handful of lines in flow.py's load_language_choice()
+    rather than importing it: flow.py imports this module near its own top,
+    before its own LANGUAGE_PATH/load_language_choice() are even defined,
+    so importing back the other way isn't available here."""
+    try:
+        code = (pc.data_dir() / "language.txt").read_text(encoding="utf-8").strip().lower()
+        return code or "en"
+    except OSError:
+        return "en"
+
+
 # large-v3-turbo (the Mac default) is fast there because mlx runs it on
 # Apple Silicon's GPU/Neural Engine. On a random Windows laptop with no GPU,
 # the same model on CPU would feel sluggish for a push-to-talk tool where
 # perceived latency matters — default to a CPU-safe small model instead, with
 # an escape hatch for anyone who does have a CUDA GPU.
-WHISPER_MODEL = os.environ.get("WINGVOX_WHISPER_MODEL", "small.en")
+#
+# small.en (English-only) and small (multilingual) are the same size/speed
+# class -- the only difference is language coverage -- so there's no CPU-
+# latency cost to picking the right one automatically from language.txt,
+# instead of leaving language.txt and WINGVOX_WHISPER_MODEL to be paired up
+# by hand. Previously: setting language.txt to anything but English was
+# silently ineffective on Windows, since small.en can't decode other
+# languages no matter what language= is passed to transcribe() -- confirmed
+# by a real user, who got fluent-sounding nonsense (Portuguese transcribed
+# as vaguely-similar-sounding English words) rather than an error.
+WHISPER_MODEL = os.environ.get(
+    "WINGVOX_WHISPER_MODEL",
+    "small.en" if _configured_language() == "en" else "small",
+)
 
 _model = None
 _model_lock = threading.Lock()

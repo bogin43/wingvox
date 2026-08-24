@@ -102,8 +102,16 @@ later.
 
 Wingvox needs to hear you. There's no Windows API to trigger the consent
 prompt the way macOS has — if the first launch can't get mic access, Wingvox
-opens **Settings > Privacy & security > Microphone** for you. Find "Wingvox"
-(or the path `install.ps1` printed) and make sure it's allowed.
+opens **Settings > Privacy & security > Microphone** for you.
+
+**Wingvox will not have its own entry on that page.** Non-Store desktop apps
+never get an individual per-app toggle on Windows — only Store apps do. What
+you'll actually find is one global switch, **"Let desktop apps access your
+microphone,"** and below it a read-only list of desktop apps that have
+recently used the mic (Wingvox may or may not appear there depending on
+whether it's tried yet — that list is informational, not something you can
+toggle). Make sure the global switch is **on**; there's nothing else on this
+page to look for.
 
 Skip this and every dictation will say "Heard nothing" even when you're
 speaking clearly.
@@ -138,6 +146,23 @@ In the Wingvox folder there are two scripts you can double-click:
 Useful when something else needs the same hotkey or the microphone — a virtual
 machine, a game, screen-sharing software, or another dictation tool.
 
+### How to tell whether Wingvox is actually running
+
+Wingvox is a background app with no window, no tray icon, and nothing to
+click on — a stopped Wingvox and a running-but-mishandled-hotkey Wingvox look
+identical from the outside (nothing happens either way). Two things to check,
+in PowerShell:
+
+```powershell
+Get-Process Wingvox                          # is it running right now?
+Get-ScheduledTaskInfo -TaskName Wingvox       # is it registered to start at login?
+```
+
+And the log file, `%LOCALAPPDATA%\Wingvox\wingvox.log` — this is the first
+place to look for anything that isn't working. It's timestamped and shows the
+whole startup sequence, each recording's captured length, the raw transcript
+vs. the cleaned-up version, and a latency breakdown for every dictation.
+
 ### How to verify it worked (Windows)
 
 Hold **Right Alt**, say a sentence, release. You should see a small pill near
@@ -149,33 +174,52 @@ rather than translucent — a Tkinter/Windows limitation, not a bug.)
 
 | What you see | Likely cause |
 |---|---|
-| "Heard nothing" every time, even speaking clearly | Microphone permission not granted (step 1) |
-| Nothing happens at all when you hold the hotkey — no pill, no sound | Antivirus/EDR blocking the global keyboard hook (step 3), or an international keyboard layout reporting Right Alt as AltGr — try the other Alt key |
+| "Too short — hold the key while you speak, then release" | You tapped instead of held — Wingvox stopped recording before you'd said anything. Hold the key down for the whole time you're speaking. (A quick tap is also a real gesture — it locks recording on hands-free, see "Run it" above — so this only fires when a tap captured essentially nothing at all.) |
+| "Heard nothing" every time, even speaking clearly | Audio was actually captured but transcribed empty — check microphone permission (step 1) first, then that the right physical mic is selected if you have more than one |
+| Nothing happens at all, ever, even right after a fresh install — no pill, no sound, no log entries | Wingvox isn't running at all — check with `Get-Process Wingvox` and `Get-ScheduledTaskInfo -TaskName Wingvox` above; if neither shows it, re-run `install.ps1` |
+| Nothing happens at all when you hold the hotkey, but Wingvox *is* running (log shows "Ready") | Antivirus/EDR blocking the global keyboard hook (step 3), or an international keyboard layout reporting Right Alt as AltGr — try the other Alt key |
 | The pill shows recording/transcribing, but nothing gets pasted | The focused window is running as Administrator — Windows' UIPI blocks simulated input into elevated windows; this can't be worked around |
 | "Ollama not running — will paste raw transcripts" | Launch the Ollama app, or run `ollama serve` |
 | "Ollama model not pulled — will paste raw transcripts" | Run `ollama pull qwen2.5:3b` |
 | "Wingvox is already running" when trying to start it manually | It's already running via the scheduled task — that's normal, no action needed |
 | Text pastes but sounds too polished/reworded | Not expected — please report this, cleanup is meant to only fix filler words and punctuation |
-| Transcription is noticeably less accurate than the website's demo | Expected on CPU-only machines — Windows defaults to the smaller `small.en` model for speed; see below to use a bigger one if you have a CUDA GPU |
+| Transcription is noticeably less accurate than the website's demo | Expected on CPU-only machines — Windows defaults to the smaller `small.en`/`small` models for speed; see below to use a bigger one if you have a CUDA GPU |
+| Non-English speech transcribed as fluent-sounding English nonsense | This shouldn't happen anymore — Wingvox now auto-selects a multilingual model when `language.txt` isn't English. If you still see it, confirm `flow.py set-language` (below) shows the language you expect, and check `wingvox.log` for which model actually loaded |
 
 ### Reference: other Whisper model sizes (Windows)
 
-Wingvox defaults to `small.en`, chosen to stay usable on a CPU-only laptop.
-Override with the `WINGVOX_WHISPER_MODEL` environment variable before
-launching (or set it permanently via Settings > System > Advanced system
-settings > Environment Variables):
+Wingvox defaults to `small.en` for English (or plain `small`, its
+multilingual counterpart, automatically once `language.txt` is set to
+anything else — see "Supported languages" below), chosen to stay usable on a
+CPU-only laptop. To pick a different model entirely — a smaller/faster one,
+or a bigger/more accurate one — override with the `WINGVOX_WHISPER_MODEL`
+environment variable. This always wins over the automatic `small.en`/`small`
+choice, for either language.
+
+Set it as a **User** environment variable (Settings > System > Advanced
+system settings > Environment Variables > *User variables for `<you>`*, not
+*System variables*), not just for your current terminal session — Wingvox
+normally starts from a Task Scheduler login task, which inherits your user
+environment but not a session-only variable set with `$env:` or `set`, so a
+session-only override silently stops applying the next time you log in.
 
 | Model | Notes |
 |---|---|
-| `tiny.en` | Fastest, roughest — short commands only |
-| `base.en` | Still rough for natural speech |
-| `small.en` (default) | Usable on CPU, reasonable latency |
-| `medium.en` | Better accuracy, noticeably slower on CPU |
+| `tiny.en` / `tiny` | Fastest, roughest — short commands only |
+| `base.en` / `base` | Still rough for natural speech |
+| `small.en` / `small` (default) | Usable on CPU, reasonable latency |
+| `medium.en` / `medium` | Better accuracy, noticeably slower on CPU |
 | `large-v3` | Best accuracy — only comfortable with a CUDA GPU |
 | `distil-large-v3` | Near-`large-v3` accuracy, faster — a good pick if you have a GPU but want lower latency |
 
 `device`/`compute_type` are set to `"auto"`, so a CUDA GPU is used
 automatically if present; otherwise it falls back to CPU with int8 quantization.
+
+Accuracy also varies a lot by language, independent of model size — `small`
+is reasonable for higher-resource languages (French, Spanish, German,
+Portuguese, ...), but a low-resource language for Whisper (e.g. Afrikaans)
+may need `medium` or larger to be genuinely usable, at a real CPU-latency
+cost on a laptop with no GPU.
 
 ## Supported languages
 
@@ -185,11 +229,21 @@ Wingvox dictates in English by default. To switch, from the Wingvox folder:
 cd ~/wingvox && ./set-language.sh fr
 ```
 
+On Windows, use `set-language.cmd` instead (same argument) from the Wingvox
+folder -- `set-language.sh` is a bash script written for the Mac venv layout
+and doesn't run there:
+
+```powershell
+cd $env:USERPROFILE\wingvox
+.\set-language.cmd fr
+```
+
 Any of the 100 codes below works. Flemish has no separate code of its own --
 it's transcribed as Dutch (`nl`), the same written standard as Netherlands
-Dutch. On Windows, the default speech model is English-only regardless of
-this setting; switching languages there also needs
-`WINGVOX_WHISPER_MODEL=small` set by hand.
+Dutch. On Windows, this also switches the speech model from the English-only
+default to a multilingual one automatically -- if it isn't already cached,
+the next restart downloads it (~1GB), so the first dictation after that will
+be slow.
 
 | Language | Code | | Language | Code | | Language | Code |
 |---|---|---|---|---|---|---|---|

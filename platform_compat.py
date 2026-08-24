@@ -66,47 +66,165 @@ def mac_hotkey_keys(choice: str):
     return (keyboard.Key.alt_r,)
 
 
+def key_vk(key):
+    """VK code for a pynput Key enum member or KeyCode instance, or None if
+    it can't be determined. A Key enum member doesn't expose vk directly --
+    it has to go through .value (its underlying KeyCode) first; a bare
+    KeyCode (an arbitrary letter/digit/symbol the hotkey picker captured)
+    already carries .vk itself. pynput uses "vk" as the field name on both
+    Windows (a real Win32 virtual-key code) and macOS (Apple's virtual
+    keycode) -- different numbering systems, but this function doesn't need
+    to reconcile them: a captured key is only ever compared against others
+    captured on the same OS."""
+    value = key.value if isinstance(key, keyboard.Key) else key
+    return getattr(value, "vk", None)
+
+
+def hotkey_keys_for(key):
+    """Expands one configured hotkey (from hotkey_picker or a loaded
+    hotkey.txt) into the tuple on_press/on_release check membership
+    against. Needed because a single captured key can under-match: on
+    Windows, physical Right Alt can report as alt_r or alt_gr depending on
+    keyboard layout/driver (see the original HOTKEY_KEYS default below) --
+    a picker or loaded file that only ever compares against the literal
+    key it captured would silently lock out whichever of the two didn't
+    happen to fire that time."""
+    if IS_WINDOWS and key in (keyboard.Key.alt_r, keyboard.Key.alt_gr):
+        return (keyboard.Key.alt_r, keyboard.Key.alt_gr)
+    return (key,)
+
+
+_KEY_LABELS = {
+    keyboard.Key.alt_r: "Right Alt", keyboard.Key.alt_l: "Left Alt",
+    keyboard.Key.alt_gr: "Right Alt", keyboard.Key.ctrl_r: "Right Ctrl",
+    keyboard.Key.ctrl_l: "Left Ctrl", keyboard.Key.shift_r: "Right Shift",
+    keyboard.Key.shift_l: "Left Shift", keyboard.Key.cmd: "Command",
+    keyboard.Key.cmd_r: "Right Command", keyboard.Key.space: "Space",
+    keyboard.Key.tab: "Tab", keyboard.Key.caps_lock: "Caps Lock",
+}
+
+
+def key_label(key) -> str:
+    """Human-readable label for an arbitrary configured hotkey, for status
+    messages ("tap {label} to dictate"). Mac's "Option" wording for
+    alt_l/alt_r (MAC_HOTKEY_LABELS) is deliberately not handled here --
+    that's layered on by the caller, since this function stays
+    platform-neutral for every other key."""
+    if isinstance(key, keyboard.Key):
+        return _KEY_LABELS.get(key, key.name.replace("_", " ").title())
+    if key.char:
+        return key.char.upper()
+    return f"key #{key.vk}" if key.vk is not None else "Unknown key"
+
+
 if IS_WINDOWS:
     import ctypes
+    VK_LMENU = 0xA4
     VK_RMENU = 0xA5
 
-    def is_hotkey_physically_down(_choice: str = "right") -> bool:
+    # Raw WH_KEYBOARD_LL hook message constants, as handed to pynput's
+    # win32_event_filter via Listener._convert()/_handler() -- duplicated
+    # here rather than reaching into pynput's private Listener._WM_* class
+    # attributes (not part of its public API). See
+    # make_alt_suppressing_event_filter() below for why these matter.
+    WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+    WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
+    _PRESS_MESSAGES = (WM_KEYDOWN, WM_SYSKEYDOWN)
+    _RELEASE_MESSAGES = (WM_KEYUP, WM_SYSKEYUP)
+
+    def is_alt_family_vk(vk) -> bool:
+        """Whether vk is Left or Right Alt -- the two physical keys whose
+        bare tap+release trips Windows' menu-access-mode reflex
+        (GUI_INMENUMODE), which silently swallows a Ctrl+V that lands while
+        the focused window is still in that state. Confirmed by live
+        reproduction: SendInput a solitary Right-Alt hold+release into a
+        real window, GetGUIThreadInfo reports GUI_INMENUMODE set
+        afterward, and a following Ctrl+V doesn't land. Generic over
+        whichever key the user actually configured as the hotkey, not
+        hardcoded to Right Alt -- a non-Alt hotkey (Right Ctrl, a letter,
+        ...) needs none of this."""
+        return vk in (VK_LMENU, VK_RMENU)
+
+    def make_alt_suppressing_event_filter(hotkey_vk, guarded_on_press, guarded_on_release, get_listener):
+        """Builds the win32_event_filter for pynput's Listener that stops a
+        bare Alt-family hotkey from ever reaching GUI_INMENUMODE. Only
+        meaningful when is_alt_family_vk(hotkey_vk) is True -- callers must
+        skip installing this filter otherwise.
+
+        Why the recording state machine has to run *inside* this filter,
+        not a separate on_press/on_release pair: pynput's
+        Listener._convert() -- which is what invokes this filter -- runs
+        BEFORE the matching press/release message is posted to pynput's
+        own dispatch queue. Calling listener.suppress_event() from a
+        separate on_press/on_release callback (a previously abandoned
+        attempt) raises SystemHook.SuppressException from inside
+        _convert() itself, which unwinds before that queue-post ever
+        happens -- on_press/on_release then silently never fire for that
+        event at all, indistinguishable from the hotkey being dead
+        (confirmed by reading pynput's installed
+        keyboard/_win32.py + _util/win32.py). Running the same guarded
+        on_press/on_release closures directly from here, then suppressing
+        only after, sidesteps that: this sees the raw event first, drives
+        the state machine itself, and only then blocks the event from
+        ever reaching the OS's own default menu-mode handling.
+
+        A solitary Right Alt's key-up arrives as plain WM_KEYUP, not
+        WM_SYSKEYUP like every other Alt release -- confirmed via the same
+        live repro above. Matched across all four message types (not just
+        the SYS-prefixed ones) so that release isn't missed.
+
+        get_listener: a zero-arg callable returning the Listener instance
+        once constructed. The filter is passed in as a Listener()
+        constructor kwarg, so the Listener doesn't exist yet when this
+        closure is built -- by the time the filter itself actually runs,
+        listener.start() has already returned and the name is bound."""
+        alt_key = keyboard.Key.alt_r if hotkey_vk == VK_RMENU else keyboard.Key.alt_l
+
+        def _filter(msg, data):
+            if data.vkCode != hotkey_vk:
+                return True  # not the hotkey -- dispatch normally
+            if msg in _PRESS_MESSAGES:
+                guarded_on_press(alt_key)
+            elif msg in _RELEASE_MESSAGES:
+                guarded_on_release(alt_key)
+            else:
+                return True
+            get_listener().suppress_event()  # raises; never returns
+        return _filter
+
+    def is_hotkey_physically_down(key) -> bool:
         """Whether the dictation key is physically held right now, read from
         the hardware rather than from the keyboard hook.
 
         The hook has been observed to silently drop the release event for
         the dictation key (seen under UTM VM keyboard passthrough): the
         press fires, the matching release never does, and the recording
-        stays open forever. Callers poll this as a backstop. It reports on
-        exactly the key HOTKEY_KEYS accepts -- polling Left Alt too would
-        end a recording on an unrelated Alt+Tab.
+        stays open forever. Callers poll this as a backstop.
 
-        Windows has no hotkey choice yet, so _choice is accepted (to keep
-        one call signature across platforms) and ignored."""
-        return bool(ctypes.windll.user32.GetAsyncKeyState(VK_RMENU) & 0x8000)
+        key is whatever the user configured (via hotkey_picker or a loaded
+        hotkey.txt) -- resolved to a VK via key_vk() so this works for any
+        hotkey, not just the original hardcoded Right Alt."""
+        vk = key_vk(key)
+        if vk is None:
+            return True  # can't determine -- fail open, same as the Mac branch below
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
 elif IS_MAC:
-    # Apple's virtual keycodes are physical positions, not characters, so
-    # these are stable across keyboard layouts.
-    _KVK_RIGHT_OPTION = 61
-    _KVK_LEFT_OPTION = 58
-    _MAC_HOTKEY_VK = {"right": _KVK_RIGHT_OPTION, "left": _KVK_LEFT_OPTION}
-
-    def is_hotkey_physically_down(choice: str = "right") -> bool:
+    def is_hotkey_physically_down(key) -> bool:
         """Mac counterpart of the Windows check above. Same purpose: a
         dropped release must not be able to wedge a recording open, and a
         wedged recording can only be cleared by restarting the app."""
+        vk = key_vk(key)
+        if vk is None:
+            return True
         try:
             from Quartz import CGEventSourceKeyState, kCGEventSourceStateHIDSystemState
-            return bool(CGEventSourceKeyState(
-                kCGEventSourceStateHIDSystemState,
-                _MAC_HOTKEY_VK.get(choice, _KVK_RIGHT_OPTION),
-            ))
+            return bool(CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, vk))
         except Exception:
             # Can't read the hardware -- claim the key is still down so the
             # watchdog never ends a recording the user is in the middle of.
             return True
 else:
-    def is_hotkey_physically_down(_choice: str = "right") -> bool:
+    def is_hotkey_physically_down(_key=None) -> bool:
         return True
 
 
@@ -404,7 +522,21 @@ def data_dir() -> Path:
 def install_dir() -> Path:
     """The git checkout Wingvox runs from. Distinct from data_dir(): on
     Windows those are different places, and the update check has to look at
-    the checkout, not at %LOCALAPPDATA%."""
+    the checkout, not at %LOCALAPPDATA%.
+
+    Under a frozen PyInstaller build, __file__ resolves inside the
+    extracted _internal directory (dist/Wingvox/_internal), not the actual
+    checkout -- confirmed by testing: NOTICE_PATH (notice.py) silently
+    never found NOTICE.md there, so the first-run privacy notice never
+    appeared at all when running the real built .exe (the git-based update
+    check happened to keep working anyway, purely by coincidence -- dist/
+    sits inside the same repo, and `git -C` walks up looking for .git
+    regardless of which subdirectory it's pointed at). wingvox.spec's
+    COLLECT always places the exe at <repo>/dist/Wingvox/Wingvox.exe, so
+    climb three levels from the running executable's own path instead of
+    trusting __file__ when frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent.parent
     return Path(__file__).resolve().parent
 
 
@@ -427,12 +559,21 @@ def _git(*args, timeout=10):
 
 def update_command() -> str:
     """The one line a user runs to take an update. Kept here so the pill,
-    the log and the docs can't drift apart."""
+    the log and the docs can't drift apart -- historically they haven't:
+    the status pill used to show a hardcoded, wrong instruction instead of
+    calling this function, which is exactly the drift this centralization
+    is meant to prevent."""
     if IS_MAC:
         return (f"cd {install_dir()} && git pull && "
                 f"launchctl kickstart -k gui/$(id -u)/{LAUNCH_AGENT_LABEL}")
-    return (f"cd {install_dir()} && git pull, then run wingvox-off.cmd "
-            "followed by wingvox-on.cmd")
+    # `git pull` alone is not enough on Windows the way it is on Mac: Mac
+    # runs flow.py straight out of the checkout, so a pull takes effect on
+    # restart with nothing else needed. Windows runs a compiled PyInstaller
+    # exe in dist\Wingvox\ -- pulling new source leaves that exe untouched,
+    # so a plain restart (wingvox-off.cmd/wingvox-on.cmd) keeps running the
+    # OLD code while reporting itself up to date. update.ps1 does the pull
+    # AND the rebuild AND the restart, in that order.
+    return f"cd {install_dir()} && .\\update.ps1"
 
 
 def check_for_update():
