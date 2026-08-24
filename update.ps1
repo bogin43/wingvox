@@ -56,4 +56,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "    Now at $(git rev-parse --short HEAD)."
 
 Step "Rebuilding and restarting (this is install.ps1 -- it skips whatever's already up to date)"
+# Tells install.ps1 this is a background update rather than someone sitting
+# at a fresh install, so it doesn't pop the setup guide open unannounced --
+# see install.ps1's own WINGVOX_UPDATE check at the end.
+$env:WINGVOX_UPDATE = "1"
 & (Join-Path $RepoDir "install.ps1")

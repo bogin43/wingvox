@@ -293,24 +293,91 @@ def request_input_monitoring() -> None:
         pass
 
 
+def _text_before_cursor_windows(max_chars: int):
+    """Windows counterpart of the Mac implementation below, via UI
+    Automation instead of the Accessibility API. Same contract: None means
+    "couldn't determine", never "empty field".
+
+    Two paths, tried in order:
+
+    1. TextPattern, for controls rich enough to expose it (Chrome/Electron
+       contenteditable, WordPad, Word). Moves only the caret range's Start
+       endpoint backward by max_chars characters rather than reading
+       DocumentRange (the whole field/document) and slicing in Python --
+       matters on a field holding a large document, where fetching the
+       entire text on every dictation would be needless latency for a
+       value only the last couple hundred characters of which are ever
+       used.
+
+    2. A classic Win32 EM_GETSEL message, for plain Edit/RichEdit controls
+       that don't support TextPattern at all -- confirmed directly against
+       real Notepad, whose text box exposes ValuePattern and
+       LegacyIAccessiblePattern but returns None for every TextPattern
+       variant. Gated on ValuePattern actually being present (an
+       affirmative "this is a text-bearing control" signal) so a control
+       that answers neither path isn't guessed at with an arbitrary
+       message send."""
+    try:
+        import uiautomation as auto
+        control = auto.GetFocusedControl()
+        if control is None:
+            return None
+        text_pattern = control.GetPattern(auto.PatternId.TextPattern)
+        if text_pattern is not None:
+            selection = text_pattern.GetSelection()
+            if not selection:
+                return None
+            before = selection[0].Clone()
+            # waitTime=0: uiautomation's default is an unconditional 0.5s
+            # sleep *after every call*, regardless of success -- confirmed
+            # by reading its source. Left at its default, this would add
+            # half a second of latency to every dictation that reaches
+            # this path, on a push-to-talk tool where perceived latency is
+            # exactly what WHISPER_MODEL's beam_size=1 (see stt_windows.py)
+            # exists to avoid.
+            before.MoveEndpointByUnit(
+                auto.TextPatternRangeEndpoint.Start, auto.TextUnit.Character,
+                -max_chars, waitTime=0,
+            )
+            return before.GetText(-1)
+
+        value_pattern = control.GetPattern(auto.PatternId.ValuePattern)
+        hwnd = control.NativeWindowHandle
+        if value_pattern is None or not hwnd:
+            return None
+        text = value_pattern.Value
+        if not isinstance(text, str):
+            return None
+        EM_GETSEL = 0x00B0
+        start = ctypes.c_uint()
+        end = ctypes.c_uint()
+        ctypes.windll.user32.SendMessageW(hwnd, EM_GETSEL, ctypes.byref(start), ctypes.byref(end))
+        return text[:start.value][-max_chars:]
+    except Exception:
+        return None
+
+
 def text_before_cursor(max_chars: int = 200):
     """Best-effort read of the text immediately before the caret in
-    whatever text field is currently focused, via the Accessibility API.
+    whatever text field is currently focused -- via the Accessibility API
+    on Mac, UI Automation's TextPattern on Windows.
 
     Lets flow.py's process() decide whether a dictation is starting a
     fresh sentence or continuing an unfinished one, and whether a space
     needs to go in before it, from what's actually in the field instead
-    of guessing from Wingvox's own dictation history. This is a more
-    sensitive use of the same Accessibility trust already granted for the
-    paste keystroke (has_accessibility_access() above): it reads nearby
-    field text, not just simulates a key press.
+    of guessing from Wingvox's own dictation history. On Mac this is a
+    more sensitive use of the same Accessibility trust already granted for
+    the paste keystroke (has_accessibility_access() above): it reads
+    nearby field text, not just simulates a key press.
 
     Returns None whenever this can't be determined -- no focused element,
-    the focused control doesn't expose AX text attributes (some Electron/
-    canvas-based editors don't), or anything else goes wrong. Callers
-    must treat None as "unknown, fall back to your own heuristic", not as
-    "empty field" -- a false "empty" would wrongly skip a needed space or
-    wrongly capitalize a continuation."""
+    the focused control doesn't expose text attributes (some Electron/
+    canvas-based editors don't, on either platform), or anything else goes
+    wrong. Callers must treat None as "unknown, fall back to your own
+    heuristic", not as "empty field" -- a false "empty" would wrongly skip
+    a needed space or wrongly capitalize a continuation."""
+    if IS_WINDOWS:
+        return _text_before_cursor_windows(max_chars)
     if not IS_MAC:
         return None
     try:
@@ -602,17 +669,7 @@ def check_for_update():
     return have_it is None
 
 
-def run_update() -> str:
-    """Run update.sh and report what happened, via its WINGVOX_RESULT marker
-    line: 'dirty', 'up_to_date', 'needs_install', 'updated', or
-    'error:<reason>'. Mac-only -- there's no click-to-update path on Windows
-    yet (a code update there needs a full PyInstaller rebuild, not just a
-    pull). Meant to be called from a background thread: this function only
-    ever blocks its caller, never raises, so the caller never needs to catch
-    anything -- a timeout, a missing script, or unexpected output all fold
-    into a plain 'error:...' string same as an actual failure would."""
-    if not IS_MAC:
-        return "error:not supported on this platform"
+def _run_update_mac() -> str:
     script = install_dir() / "update.sh"
     if not script.exists():
         return "error:update.sh not found"
@@ -631,6 +688,69 @@ def run_update() -> str:
         if line.startswith("WINGVOX_RESULT:"):
             return line[len("WINGVOX_RESULT:"):].strip()
     return f"error:no result marker (exit {r.returncode})"
+
+
+def _run_update_windows() -> str:
+    """Unlike Mac's synchronous update.sh run above, this can't wait for
+    update.ps1 to finish and read its result: partway through, install.ps1
+    (which update.ps1 hands off to) stops the running Wingvox.exe -- which
+    is *this* process -- before it can rebuild the now-locked binary. A
+    subprocess.run() call waiting on that would simply never return, because
+    the process making the call is the one about to die. So the dirty/behind
+    checks below run directly in Python first (cheap, and don't touch
+    anything), and only the actual pull+rebuild+restart is handed off,
+    fire-and-forget, the same way Mac's launchctl kickstart -k tears its own
+    process down mid-update and lets a freshly-relaunched one take over.
+
+    CREATE_BREAKAWAY_FROM_JOB matters specifically because Wingvox runs
+    under a Task Scheduler-owned job: child processes normally inherit that
+    job, and Task Scheduler can tear down every process still in it the
+    moment the task's main process (this one) ends -- which would kill
+    update.ps1 before it ever finishes, not just this process. Breakaway
+    lets it survive independently. If the job doesn't permit breakaway,
+    process creation itself fails cleanly (caught below) rather than
+    launching something that would get silently killed partway through."""
+    script = install_dir() / "update.ps1"
+    if not script.exists():
+        return "error:update.ps1 not found"
+    dirty = _git("status", "--short", "--untracked-files=no")
+    if dirty:
+        return "dirty"
+    behind = check_for_update()
+    if behind is None:
+        return "error:couldn't check for an update (offline, or not a git checkout)"
+    if behind is False:
+        return "up_to_date"
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            cwd=str(install_dir()),
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_BREAKAWAY_FROM_JOB
+                | subprocess.DETACHED_PROCESS
+            ),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except Exception as e:
+        return f"error:{e}"
+    return "updated"
+
+
+def run_update() -> str:
+    """Take a published update and report what happened: 'dirty',
+    'up_to_date', 'needs_install' (Mac only -- see update.sh), 'updated', or
+    'error:<reason>'. Meant to be called from a background thread: this
+    function only ever blocks its caller, never raises, so the caller never
+    needs to catch anything -- a timeout, a missing script, or unexpected
+    output all fold into a plain 'error:...' string same as an actual
+    failure would."""
+    if IS_MAC:
+        return _run_update_mac()
+    if IS_WINDOWS:
+        return _run_update_windows()
+    return "error:not supported on this platform"
 
 
 # ---------- Windows: clear any stuck modifier before a simulated paste ----------
@@ -805,17 +925,55 @@ def wasapi_hostapi_index(sd):
     return None
 
 
+# Substrings Windows uses in a Bluetooth mic's device name -- seen in the
+# wild as e.g. "Headset (Bluetooth Hands-Free AG Audio)" or "Bluetooth
+# Hands-Free Audio". Not exhaustive (Windows has no stable, driver-independent
+# "this is Bluetooth" flag the way CoreAudio's transport type does), but these
+# two catch the labeling Windows itself generates for the HFP profile, which
+# is what a Bluetooth headset's *microphone* shows up as -- its higher-quality
+# A2DP profile is playback-only and never appears as an input device at all.
+_BLUETOOTH_MIC_HINTS = ("bluetooth", "hands-free")
+
+
 def default_windows_input_device(sd):
     """PortAudio's default host API on Windows is often MME (higher latency,
     occasionally flaky) rather than WASAPI. Return WASAPI's default input
-    device index, or None (caller falls back to the system default)."""
+    device index, or None (caller falls back to the system default).
+
+    Also steers away from a Bluetooth headset mic when one is the current
+    default: Bluetooth's HFP mic profile downgrades the *output* audio
+    quality on every app system-wide for as long as it's in use (not just
+    Wingvox's own recording), so a laptop's built-in mic is very likely the
+    better choice whenever both are available. Unlike Mac (mac_builtin_mic_name
+    above), there's no stable hardware identifier for "the built-in mic" on
+    Windows to match against directly -- this looks for the opposite signal
+    instead: any other WASAPI input device whose name doesn't look like a
+    Bluetooth mic. Imperfect on a desktop with no built-in mic and only USB
+    peripherals (it would just pick another arbitrary USB device), but that
+    case has no default worth preferring over the OS's own choice anyway."""
     if not IS_WINDOWS:
         return None
     try:
-        for api in sd.query_hostapis():
+        hostapis = sd.query_hostapis()
+        wasapi_index = None
+        for i, api in enumerate(hostapis):
             if "wasapi" in api["name"].lower():
-                device = api.get("default_input_device", -1)
-                return device if device >= 0 else None
+                wasapi_index = i
+                break
+        if wasapi_index is None:
+            return None
+        default_device = hostapis[wasapi_index].get("default_input_device", -1)
+        if default_device < 0:
+            return None
+        devices = sd.query_devices()
+        default_name = devices[default_device]["name"].lower()
+        if not any(hint in default_name for hint in _BLUETOOTH_MIC_HINTS):
+            return default_device
+        for i, d in enumerate(devices):
+            if (d["max_input_channels"] > 0 and d["hostapi"] == wasapi_index
+                    and not any(hint in d["name"].lower() for hint in _BLUETOOTH_MIC_HINTS)):
+                return i
+        return default_device  # no non-Bluetooth alternative found
     except Exception:
         pass
     return None

@@ -66,12 +66,10 @@ def run_model(audio, prompt, language="en"):
     """Returns a list of segment dicts with at least text/no_speech_prob/
     compression_ratio, matching stt_mac.run_model's contract.
 
-    language is accepted for parity with stt_mac's signature, but WHISPER_MODEL
-    defaults to "small.en" -- an English-only model variant that can't decode
-    other languages no matter what's passed here. A non-English language.txt
-    setting is silently ineffective on Windows until WINGVOX_WHISPER_MODEL is
-    also set to a multilingual model (e.g. "small") by hand; flow.py doesn't
-    enforce that pairing today."""
+    language is accepted for parity with stt_mac's signature, but has no
+    effect on which weights get loaded -- WHISPER_MODEL above already picks
+    "small.en" vs "small" from language.txt at import time, before this is
+    ever called."""
     model = _get_model()
     with _transcribe_lock:
         segments, _info = model.transcribe(

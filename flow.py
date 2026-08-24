@@ -1016,13 +1016,7 @@ def run():
     def status(text, color="white", hide_after=None, on_click=None):
         print(f"  {text}")
         if overlay:
-            # overlay_windows.StatusOverlay.show() has no on_click param --
-            # forwarding it unconditionally would raise TypeError there the
-            # first time an update is found on Windows.
-            if pc.IS_MAC:
-                overlay.show(text, color, hide_after=hide_after, on_click=on_click)
-            else:
-                overlay.show(text, color, hide_after=hide_after)
+            overlay.show(text, color, hide_after=hide_after, on_click=on_click)
 
     mac_permission_flow(status)
 
@@ -1395,9 +1389,11 @@ def run():
             warm_done.set()
 
     def _do_update():
-        # Runs on a background thread -- update.sh itself can block on a
-        # slow git fetch/pull, and must never hold up the Cocoa main thread
-        # that _handle_update_click was called from.
+        # Runs on a background thread -- pc.run_update() can block on a slow
+        # git fetch/pull (Mac) or just take a moment to check dirty/behind
+        # status before handing off (Windows), and must never hold up the
+        # UI thread that _handle_update_click was called from (AppKit on
+        # Mac, Tkinter on Windows).
         result = pc.run_update()
         if result == "dirty":
             status("⚠ Update available, but the Wingvox folder has uncommitted "
@@ -1411,20 +1407,22 @@ def run():
             # machine between the check and the click.
             status("✓ Already up to date", "green", hide_after=3)
         elif result == "updated":
-            # update.sh's own `launchctl kickstart -k` is already tearing
-            # this process down to relaunch it at the new commit -- nothing
-            # further to do here (same as the existing permission-grant
-            # restart in mac_permission_flow).
+            # Mac: update.sh's own `launchctl kickstart -k` is already
+            # tearing this process down to relaunch it at the new commit.
+            # Windows: update.ps1 was just launched, detached, to pull and
+            # rebuild -- it will stop and restart this same process partway
+            # through. Either way nothing further to do here (same as the
+            # existing permission-grant restart in mac_permission_flow).
             pass
         else:
             reason = result.split(":", 1)[1] if ":" in result else result
             status(f"⚠ Update failed ({reason})", "orange", hide_after=12)
 
     def _handle_update_click():
-        # Called on the main thread (AppKit delivers the click there). Must
-        # not block on network/git -- flip the pill to a non-interactive
-        # "working" state immediately, then hand the real work to a
-        # background thread.
+        # Called on the UI thread (AppKit's event monitor on Mac, a Tkinter
+        # canvas click binding on Windows). Must not block on network/git --
+        # flip the pill to a non-interactive "working" state immediately,
+        # then hand the real work to a background thread.
         status("Updating…", "gray")
         threading.Thread(target=_do_update, daemon=True, name="wingvox-update").start()
 
@@ -1433,23 +1431,14 @@ def run():
         # its pill doesn't stomp on "Ready", it never blocks startup, and a
         # failure (offline, no git, someone's own fork) is a log line rather
         # than anything the user sees. Wingvox never pulls an update on its
-        # own -- only in direct response to the user clicking the pill (Mac)
-        # or running update.sh themselves (Windows, no click-to-update yet).
+        # own -- only in direct response to the user clicking the pill.
         warm_done.wait(180)
         time.sleep(5)  # let the "Ready" pill finish its own hide_after
         behind = pc.check_for_update()
         if behind:
             print(f"  Update available — run: {pc.update_command()}")
-            if pc.IS_MAC:
-                status("Update available", "orange", hide_after=30,
-                       on_click=_handle_update_click)
-            else:
-                # Was hardcoded to the Mac instruction here (drifting from
-                # the platform-aware command already logged above) --
-                # pc.update_command() is the single source of truth for
-                # both, precisely so they can't disagree again.
-                status(f"Update available — {pc.update_command()}",
-                       "orange", hide_after=15)
+            status("Update available", "orange", hide_after=30,
+                   on_click=_handle_update_click)
         elif behind is False:
             print("  Up to date.")
         else:

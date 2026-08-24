@@ -108,7 +108,8 @@ written standard as Netherlands Dutch. On Windows, this also switches the
 speech model from the English-only default to a multilingual one
 automatically.
 
-To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
+To update it later, run `./update.sh` from the Wingvox folder, or just click
+"Update" on the status pill when it shows one is available — Wingvox tells
 you when there's something to take; it never installs anything on its own.
 
 To remove it, run `./uninstall.sh` from the Wingvox folder. It stops Wingvox,
@@ -141,11 +142,25 @@ Takes a few minutes, longer on a slow connection: the Whisper model
 cleanup model another ~2GB. Budget **~3.5GB of disk** for everything
 (models, the Python environment, and the built app).
 
+**Smaller install.** The cleanup model is most of that download. To skip it:
+
+```powershell
+$env:WINGVOX_LITE = "1"
+.\install.ps1
+```
+
+That brings the install down to about **1.5GB**. Dictation still works —
+Whisper already produces punctuated text — but you lose the cleanup pass
+that strips "um" and "so like" and tidies sentence boundaries. Re-run the
+normal installer any time to add it.
+
 Don't move the `%USERPROFILE%\wingvox` folder after installing — the background
 task references this exact location.
 
-To update later, re-run the same one-liner: it pulls the latest code and
-re-installs over the top, keeping your glossary and corrections.
+To update later, click "Update" on the status pill when it shows one is
+available — it pulls the latest code, rebuilds, and restarts on its own.
+Or run `.\update.ps1` from the Wingvox folder (equivalent to re-running the
+one-liner): either way keeps your glossary and corrections.
 
 To remove it, run `.\uninstall.ps1` from the Wingvox folder.
 
@@ -266,7 +281,9 @@ WINGVOX_INPUT_DEVICE="MacBook Air Microphone" ./venv/bin/python flow.py
 
 **Windows**: no universal built-in-mic name to match, so it uses the system
 default input device, preferring the WASAPI host API over PortAudio's default
-(often MME, higher latency). Override with the same environment variable:
+(often MME, higher latency), and steering away from a connected Bluetooth
+headset's mic in favor of any other available input device when one is the
+current default. Override with the same environment variable:
 
 ```powershell
 $env:WINGVOX_INPUT_DEVICE = "Realtek"; .\venv\Scripts\python.exe flow.py

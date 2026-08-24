@@ -39,6 +39,21 @@ COLORS = {
 BG_CAPSULE = "#141414"        # opaque stand-in for the Mac version's translucent black
 TRANSPARENT_KEY = "#010203"   # colorkey -- must never appear in any drawn shape
 
+# Update/Not-now button geometry -- same layout constants as overlay_mac's
+# BTN_H/NOTNOW_W/UPDATE_W/etc, so the two pills read as the same design.
+BTN_H = 26
+NOTNOW_W = 74
+UPDATE_W = 66
+BTN_GAP = 8
+BTN_RIGHT_MARGIN = 14
+NOTNOW_X0 = PANEL_W - BTN_RIGHT_MARGIN - NOTNOW_W
+UPDATE_X0 = NOTNOW_X0 - BTN_GAP - UPDATE_W
+BTN_Y0 = (PANEL_H - BTN_H) / 2.0
+MSG_X = 16
+MSG_W_INTERACTIVE = UPDATE_X0 - BTN_GAP - MSG_X
+UPDATE_BG, UPDATE_FG = "#4cb86b", "#ffffff"
+NOTNOW_BG, NOTNOW_FG = "#3a3a3a", "#d1d1d1"
+
 WAVE_TICK_MS = 50  # ~20Hz, matches overlay_mac's WAVE_TICK_HZ
 WAVE_LEVEL_GAIN = 55.0
 NOISE_GATE = 0.4
@@ -87,16 +102,29 @@ def _rect_for(w, h):
     return x, y
 
 
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+
+
 def _make_click_through(root):
     root.update_idletasks()
     hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    WS_EX_TRANSPARENT = 0x00000020
     style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     ctypes.windll.user32.SetWindowLongW(
         hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT
     )
+    return hwnd
+
+
+def _set_click_through(hwnd, enabled: bool) -> None:
+    """Toggles WS_EX_TRANSPARENT on the already-layered window -- used to let
+    clicks land on the Update/Not-now buttons while the pill is showing them,
+    without giving up click-through the rest of the time (Mac's equivalent is
+    panel.setIgnoresMouseEvents_ in overlay_mac.py)."""
+    style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    style = (style | WS_EX_TRANSPARENT) if enabled else (style & ~WS_EX_TRANSPARENT)
+    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
 def _rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
@@ -124,6 +152,7 @@ class StatusOverlay:
         self._smoothed = 0.0   # audio callback thread, no queue hop --
         self._phase = 0.0      # same as overlay_mac's pushRawLevel_/tick_.
         self._recording = False
+        self._on_click = None  # armed only while showing an interactive state
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
@@ -135,17 +164,17 @@ class StatusOverlay:
         self.canvas = tk.Canvas(self.root, highlightthickness=0, bg=TRANSPARENT_KEY)
         self.canvas.pack(fill="both", expand=True)
 
-        _make_click_through(self.root)
+        self._hwnd = _make_click_through(self.root)
         self.root.after(WAVE_TICK_MS, self._pump)
         _active_overlay = self
 
     # ---------- public, thread-safe API ----------
 
-    def show(self, text, color="white", hide_after=None):
+    def show(self, text, color="white", hide_after=None, on_click=None):
         with self._seq_lock:
             self._seq += 1
             seq = self._seq
-        self._q.put(("show", text, color, hide_after, seq))
+        self._q.put(("show", text, color, hide_after, on_click, seq))
 
     def show_recording(self):
         with self._seq_lock:
@@ -182,9 +211,9 @@ class StatusOverlay:
     def _handle(self, cmd):
         kind = cmd[0]
         if kind == "show":
-            _, text, color, hide_after, seq = cmd
+            _, text, color, hide_after, on_click, seq = cmd
             self._recording = False
-            self._draw_status(text, color)
+            self._draw_status(text, color, on_click)
             if hide_after is not None:
                 self.root.after(int(hide_after * 1000), lambda: self._hide_if_current(seq))
         elif kind == "show_recording":
@@ -201,26 +230,76 @@ class StatusOverlay:
             if seq != self._seq:
                 return  # a newer message already superseded this one
         self._recording = False
+        self._on_click = None
+        _set_click_through(self._hwnd, True)
         self.root.withdraw()
 
     def _position(self, w, h):
         x, y = _rect_for(w, h)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-    def _draw_status(self, text, color):
+    def _draw_status(self, text, color, on_click=None):
         self._position(PANEL_W, PANEL_H)
         self.canvas.delete("all")
         _rounded_rect(self.canvas, 0, 0, PANEL_W, PANEL_H, PANEL_H // 2, fill=BG_CAPSULE, outline="")
-        self.canvas.create_text(
-            PANEL_W // 2, PANEL_H // 2, text=text,
-            fill=COLORS.get(color, COLORS["white"]),
-            font=("Segoe UI", 11), anchor="c",
-        )
+        self._on_click = on_click
+        interactive = on_click is not None
+        if interactive:
+            self.canvas.create_text(
+                MSG_X, PANEL_H // 2, text=text, width=MSG_W_INTERACTIVE,
+                fill=COLORS.get(color, COLORS["white"]),
+                font=("Segoe UI", 11), anchor="w",
+            )
+            self._draw_button(UPDATE_X0, "Update", UPDATE_BG, UPDATE_FG, self._on_update_click)
+            self._draw_button(NOTNOW_X0, "Not now", NOTNOW_BG, NOTNOW_FG, self._on_notnow_click, width=NOTNOW_W)
+        else:
+            self.canvas.create_text(
+                PANEL_W // 2, PANEL_H // 2, text=text,
+                fill=COLORS.get(color, COLORS["white"]),
+                font=("Segoe UI", 11), anchor="c",
+            )
+        _set_click_through(self._hwnd, not interactive)
         self.root.deiconify()
+
+    def _draw_button(self, x0, text, bg, fg, handler, width=UPDATE_W):
+        item = _rounded_rect(self.canvas, x0, BTN_Y0, x0 + width, BTN_Y0 + BTN_H,
+                              BTN_H / 2, fill=bg, outline="", tags=("button",))
+        label = self.canvas.create_text(
+            x0 + width / 2, BTN_Y0 + BTN_H / 2, text=text, fill=fg,
+            font=("Segoe UI", 10), anchor="c", tags=("button",),
+        )
+        for tag_id in (item, label):
+            self.canvas.tag_bind(tag_id, "<Button-1>", lambda _e, h=handler: h())
+
+    def _resolve_click(self, cb):
+        # Clear the callback and re-arm click-through *before* invoking it,
+        # so a second click delivered a moment later can never re-fire or
+        # double-fire -- same ordering as overlay_mac's _resolve_. Removes
+        # just the buttons, leaving the message text as-is (same as Mac,
+        # which hides the button views but doesn't touch the label) --
+        # the caller is expected to immediately show() a new message, except
+        # "Not now" (cb is None), which has nothing coming and so withdraws
+        # the pill outright, matching overlay_mac's handle_dismiss.
+        self._on_click = None
+        _set_click_through(self._hwnd, True)
+        self.canvas.delete("button")
+        if cb is not None:
+            cb()
+        else:
+            self.root.withdraw()
+
+    def _on_update_click(self):
+        cb = self._on_click
+        self._resolve_click(cb)
+
+    def _on_notnow_click(self):
+        self._resolve_click(None)
 
     def _draw_recording_frame(self):
         self._position(WAVE_PANEL_W, WAVE_PANEL_H)
         self.canvas.delete("all")
+        self._on_click = None
+        _set_click_through(self._hwnd, True)
         _rounded_rect(self.canvas, 0, 0, WAVE_PANEL_W, WAVE_PANEL_H,
                       WAVE_PANEL_H // 2, fill="black", outline="")
         self.root.deiconify()

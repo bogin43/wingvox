@@ -66,5 +66,8 @@ pyobjc-framework-CoreText==12.2.1; sys_platform == "darwin"
 faster-whisper; sys_platform == "win32"
 # Cross-platform clipboard, used in place of pbcopy/pbpaste.
 pyperclip; sys_platform == "win32"
+# UI Automation client (via comtypes) -- lets text_before_cursor() read text
+# near the caret, the Windows counterpart of Mac's Accessibility-API read.
+uiautomation; sys_platform == "win32"
 # Needed to build Wingvox's onedir .exe (install.ps1's PyInstaller step).
 pyinstaller; sys_platform == "win32"
