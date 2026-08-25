@@ -33,6 +33,7 @@ self-rescheduling root.after() poll on the main thread.
 """
 
 import ctypes
+import ctypes.wintypes as wintypes
 import math
 import queue
 import threading
@@ -109,27 +110,20 @@ def _font(size):
 _active_overlay = None
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", ctypes.c_ulong)]
+
+
 def _monitor_rect_under_cursor():
     """(left, top, right, bottom) of the monitor containing the cursor, in
     Win32 screen coordinates (origin top-left)."""
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                    ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-
-    user32 = ctypes.windll.user32
-    pt = POINT()
+    pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     MONITOR_DEFAULTTONEAREST = 2
     hmon = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
-    info = MONITORINFO()
-    info.cbSize = ctypes.sizeof(MONITORINFO)
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
     user32.GetMonitorInfoW(hmon, ctypes.byref(info))
     r = info.rcMonitor
     return r.left, r.top, r.right, r.bottom
@@ -197,13 +191,60 @@ class _BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
 
 
+# Every one of these handle-bearing functions needs an explicit argtypes/
+# restype: ctypes' default marshaling for an undeclared foreign function
+# assumes a 32-bit C int, and a GDI/window handle on 64-bit Windows is a
+# full pointer-sized value that can exceed that range. Left undeclared,
+# this doesn't fail reliably -- it depends on whether a given handle's
+# numeric value happens to fit in 32 bits, which varies by process and
+# handle-table state -- confirmed by a real crash in production
+# (ctypes.ArgumentError: OverflowError on CreateCompatibleDC) that never
+# reproduced in local testing before it shipped. c_void_p is used uniformly
+# for every handle type (HDC, HBITMAP, the generic HGDIOBJ SelectObject
+# takes/returns) rather than picking out the exact wintypes name for each,
+# since all of them are equally just opaque pointer-sized values to ctypes.
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = ctypes.c_void_p
+user32.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+user32.SetWindowLongW.restype = ctypes.c_long
+user32.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND, ctypes.c_void_p, ctypes.POINTER(_POINT), ctypes.POINTER(_SIZE),
+    ctypes.c_void_p, ctypes.POINTER(_POINT), wintypes.COLORREF,
+    ctypes.POINTER(_BLENDFUNCTION), wintypes.DWORD,
+]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.CreateDIBSection.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(_BITMAPINFO), wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+]
+gdi32.CreateDIBSection.restype = ctypes.c_void_p
+gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32.SelectObject.restype = ctypes.c_void_p
+gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+gdi32.DeleteObject.restype = wintypes.BOOL
+
+
 def _make_click_through(root):
     root.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-    style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    ctypes.windll.user32.SetWindowLongW(
-        hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT
-    )
+    hwnd = user32.GetParent(root.winfo_id())
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
     return hwnd
 
 
@@ -214,9 +255,9 @@ def _set_click_through(hwnd, enabled: bool) -> None:
     panel.setIgnoresMouseEvents_ in overlay_mac.py). Independent of
     UpdateLayeredWindow/ULW_ALPHA, which only controls the window's
     appearance -- input delivery is governed by this style bit alone."""
-    style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     style = (style | WS_EX_TRANSPARENT) if enabled else (style & ~WS_EX_TRANSPARENT)
-    ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
 
 
 def _premultiplied_bgra_bytes(img: Image.Image) -> bytes:
