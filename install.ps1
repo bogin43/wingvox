@@ -328,6 +328,50 @@ try {
     Write-Host "    script again, or launch it by hand each time from: $ExePath"
 }
 
+# ---------- 11. Updater task (for click-to-update) ----------
+# A second, trigger-less task that only ever runs on demand (Start-ScheduledTask,
+# called from platform_compat.run_update() when the status pill's Update button
+# is clicked). It has to be a SEPARATE task, not a plain child process of
+# Wingvox.exe: confirmed by reproduction that Windows denies
+# CREATE_BREAKAWAY_FROM_JOB ("Access is denied", WinError 5) for a process
+# launched from inside Wingvox's own Task-Scheduler job on at least some
+# Windows configurations, which would otherwise mean update.ps1 -- which
+# stops and rebuilds Wingvox.exe partway through -- gets torn down along with
+# the very process that spawned it, before the rebuild ever finishes. A
+# separate top-level scheduled task has no such parent/job relationship to
+# Wingvox.exe at all, so stopping Wingvox has no effect on it.
+Step "Installing the updater task"
+try {
+    Unregister-ScheduledTask -TaskName Wingvox-Updater -Confirm:$false -ErrorAction Stop
+} catch {
+    if (Get-ScheduledTask -TaskName Wingvox-Updater -ErrorAction SilentlyContinue) {
+        Write-Host "    Removing an old version of the updater task needs administrator approval -- a Windows prompt is coming."
+        Start-Process powershell -ArgumentList @(
+            "-NoProfile", "-Command",
+            "Unregister-ScheduledTask -TaskName Wingvox-Updater -Confirm:`$false"
+        ) -Verb RunAs -Wait -WindowStyle Hidden
+    }
+}
+try {
+    $updateScript = Join-Path $RepoDir "update.ps1"
+    $updaterAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$updateScript`"" `
+        -WorkingDirectory $RepoDir
+    $updaterPrincipal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $updaterSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+    Register-ScheduledTask -TaskName Wingvox-Updater -Action $updaterAction `
+        -Principal $updaterPrincipal -Settings $updaterSettings `
+        -Description "Runs Wingvox's update.ps1 on demand, independent of the main Wingvox task" `
+        -ErrorAction Stop | Out-Null
+    Write-Host "    Updater task ready."
+} catch {
+    Write-Host "    WARNING: couldn't register the updater task ($($_.Exception.Message))."
+    Write-Host "    Clicking Update on the status pill won't work until this script is"
+    Write-Host "    re-run successfully; update.ps1 can still be run by hand."
+}
+
 # ---------- Done ----------
 Step "Install complete"
 Write-Host ""

@@ -702,17 +702,19 @@ def _run_update_windows() -> str:
     fire-and-forget, the same way Mac's launchctl kickstart -k tears its own
     process down mid-update and lets a freshly-relaunched one take over.
 
-    CREATE_BREAKAWAY_FROM_JOB matters specifically because Wingvox runs
-    under a Task Scheduler-owned job: child processes normally inherit that
-    job, and Task Scheduler can tear down every process still in it the
-    moment the task's main process (this one) ends -- which would kill
-    update.ps1 before it ever finishes, not just this process. Breakaway
-    lets it survive independently. If the job doesn't permit breakaway,
-    process creation itself fails cleanly (caught below) rather than
-    launching something that would get silently killed partway through."""
-    script = install_dir() / "update.ps1"
-    if not script.exists():
-        return "error:update.ps1 not found"
+    update.ps1 is triggered via the separate "Wingvox-Updater" scheduled
+    task (install.ps1 registers it, trigger-less, run-on-demand only) rather
+    than spawned directly as a child of this process. A direct child
+    inherits this process's Task-Scheduler job, and update.ps1 stopping
+    Wingvox.exe partway through would risk taking its own job-mate down
+    with it. The obvious fix -- CREATE_BREAKAWAY_FROM_JOB -- turns out not
+    to be available here: confirmed by reproduction that CreateProcess
+    fails outright with WinError 5 (Access is denied) when asked to break
+    away from Wingvox's own Task-Scheduler job on this configuration, so
+    that flag can't be relied on. A separate top-level scheduled task has
+    no parent/job relationship to Wingvox.exe at all -- stopping Wingvox
+    can't affect it, no matter how Task Scheduler treats job membership on
+    a given Windows version."""
     dirty = _git("status", "--short", "--untracked-files=no")
     if dirty:
         return "dirty"
@@ -722,19 +724,15 @@ def _run_update_windows() -> str:
     if behind is False:
         return "up_to_date"
     try:
-        subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-            cwd=str(install_dir()),
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP
-                | subprocess.CREATE_BREAKAWAY_FROM_JOB
-                | subprocess.DETACHED_PROCESS
-            ),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True,
+        r = subprocess.run(
+            ["schtasks", "/run", "/tn", "Wingvox-Updater"],
+            capture_output=True, text=True, timeout=15,
         )
     except Exception as e:
         return f"error:{e}"
+    if r.returncode != 0:
+        reason = (r.stderr or r.stdout).strip() or f"exit {r.returncode}"
+        return f"error:couldn't start the updater task ({reason})"
     return "updated"
 
 

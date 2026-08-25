@@ -63,6 +63,8 @@ Write-Host "    Stopped."
 Step "Removing scheduled tasks"
 try { schtasks /delete /tn Wingvox /f 2>$null | Out-Null } catch {}
 Write-Host "    Removed 'Wingvox' (the dictation app)."
+try { schtasks /delete /tn Wingvox-Updater /f 2>$null | Out-Null } catch {}
+Write-Host "    Removed 'Wingvox-Updater' (the click-to-update helper task)."
 # Earlier versions registered a separate logon task to run `ollama serve`,
 # since winget's package doesn't persist one. install.ps1 no longer creates
 # this task (Wingvox starts Ollama itself, see start_ollama_background in
