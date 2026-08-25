@@ -183,17 +183,21 @@ rather than translucent — a Tkinter/Windows limitation, not a bug.)
 | "Ollama model not pulled — will paste raw transcripts" | Run `ollama pull qwen2.5:3b` |
 | "Wingvox is already running" when trying to start it manually | It's already running via the scheduled task — that's normal, no action needed |
 | Text pastes but sounds too polished/reworded | Not expected — please report this, cleanup is meant to only fix filler words and punctuation |
-| Transcription is noticeably less accurate than the website's demo | Expected on CPU-only machines — Windows defaults to the smaller `small.en`/`small` models for speed; see below to use a bigger one if you have a CUDA GPU |
+| Transcription is noticeably less accurate than the website's demo | Expected on CPU-only machines — Windows defaults to the smaller `base.en`/`base` models for speed; see below to use a bigger one (`small.en`/`small` is a good middle ground) if you have a CUDA GPU, or even without one if you'd rather trade some speed back for accuracy |
 | Non-English speech transcribed as fluent-sounding English nonsense | This shouldn't happen anymore — Wingvox now auto-selects a multilingual model when `language.txt` isn't English. If you still see it, confirm `flow.py set-language` (below) shows the language you expect, and check `wingvox.log` for which model actually loaded |
 
 ### Reference: other Whisper model sizes (Windows)
 
-Wingvox defaults to `small.en` for English (or plain `small`, its
+Wingvox defaults to `base.en` for English (or plain `base`, its
 multilingual counterpart, automatically once `language.txt` is set to
-anything else — see "Supported languages" below), chosen to stay usable on a
-CPU-only laptop. To pick a different model entirely — a smaller/faster one,
+anything else — see "Supported languages" below). `base.en` was picked over
+the more accurate `small.en` specifically for CPU-only laptop speed —
+measured on a low-power Windows laptop (i5-8250U, no GPU), `base.en`
+decoded a benchmark clip about 3x faster than `small.en` (1.15s vs 3.59s
+for a 4s clip) and is roughly a third the download size (~0.15GB vs
+~0.45GB). To pick a different model entirely — an even smaller/faster one,
 or a bigger/more accurate one — override with the `WINGVOX_WHISPER_MODEL`
-environment variable. This always wins over the automatic `small.en`/`small`
+environment variable. This always wins over the automatic `base.en`/`base`
 choice, for either language.
 
 Set it as a **User** environment variable (Settings > System > Advanced
@@ -206,9 +210,9 @@ session-only override silently stops applying the next time you log in.
 | Model | Notes |
 |---|---|
 | `tiny.en` / `tiny` | Fastest, roughest — short commands only |
-| `base.en` / `base` | Still rough for natural speech |
-| `small.en` / `small` (default) | Usable on CPU, reasonable latency |
-| `medium.en` / `medium` | Better accuracy, noticeably slower on CPU |
+| `base.en` / `base` (default) | Usable on CPU, prioritizes speed |
+| `small.en` / `small` | More accurate, noticeably slower on CPU — a good middle ground if `base.en`'s accuracy isn't cutting it |
+| `medium.en` / `medium` | Better accuracy still, slow enough on CPU that a CUDA GPU is recommended |
 | `large-v3` | Best accuracy — only comfortable with a CUDA GPU |
 | `distil-large-v3` | Near-`large-v3` accuracy, faster — a good pick if you have a GPU but want lower latency |
 
@@ -242,8 +246,8 @@ Any of the 100 codes below works. Flemish has no separate code of its own --
 it's transcribed as Dutch (`nl`), the same written standard as Netherlands
 Dutch. On Windows, this also switches the speech model from the English-only
 default to a multilingual one automatically -- if it isn't already cached,
-the next restart downloads it (~1GB), so the first dictation after that will
-be slow.
+the next restart downloads it (~0.15GB), so the first dictation after that
+will be slow.
 
 | Language | Code | | Language | Code | | Language | Code |
 |---|---|---|---|---|---|---|---|

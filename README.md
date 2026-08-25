@@ -138,8 +138,8 @@ cd $env:USERPROFILE\wingvox
 Installs Ollama/Python as needed, downloads both models, builds `Wingvox.exe`,
 and registers a Task Scheduler entry so it starts automatically at login.
 Takes a few minutes, longer on a slow connection: the Whisper model
-(`small.en` by default — see `SETUP.md` for other sizes) is ~1GB and the
-cleanup model another ~2GB. Budget **~3.5GB of disk** for everything
+(`base.en` by default — see `SETUP.md` for other sizes) is ~0.15GB and the
+cleanup model another ~2GB. Budget **~2.5GB of disk** for everything
 (models, the Python environment, and the built app).
 
 **Smaller install.** The cleanup model is most of that download. To skip it:
@@ -149,7 +149,7 @@ $env:WINGVOX_LITE = "1"
 .\install.ps1
 ```
 
-That brings the install down to about **1.5GB**. Dictation still works —
+That brings the install down to about **0.5GB**. Dictation still works —
 Whisper already produces punctuated text — but you lose the cleanup pass
 that strips "um" and "so like" and tidies sentence boundaries. Re-run the
 normal installer any time to add it.
@@ -311,6 +311,11 @@ $env:WINGVOX_INPUT_DEVICE = "Realtek"; .\venv\Scripts\python.exe flow.py
 - Verified working with Wi-Fi off
 
 Windows performance depends heavily on the CPU (and GPU, if you have an NVIDIA
-card) — no benchmark numbers yet. The default `small.en` model is chosen to be
-usable on CPU-only laptops; set `WINGVOX_WHISPER_MODEL` to a bigger model if
-you have a CUDA GPU (see `SETUP.md`).
+card). Measured on a low-power CPU-only laptop (i5-8250U, no GPU): a 4s
+benchmark clip decoded in 3.59s on `small.en`, 1.15s on `base.en`, 0.61s on
+`tiny.en` (`compute_type="auto"` already selects the fastest correct CPU
+backend, int8, on its own — explicit thread-count tuning made no
+meaningful difference on this hardware). The default `base.en` model is
+chosen to prioritize speed on CPU-only laptops; set `WINGVOX_WHISPER_MODEL`
+to `small.en` or bigger for more accuracy, especially if you have a CUDA
+GPU (see `SETUP.md`).

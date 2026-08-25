@@ -30,18 +30,29 @@ def _configured_language() -> str:
 # perceived latency matters — default to a CPU-safe small model instead, with
 # an escape hatch for anyone who does have a CUDA GPU.
 #
-# small.en (English-only) and small (multilingual) are the same size/speed
+# base.en/base over small.en/small: measured on a real low-power laptop CPU
+# (i5-8250U, no CUDA) -- small.en took long enough per dictation that
+# perceived latency was the top complaint about the Windows build. base.en
+# decoded a benchmark clip roughly 3x faster than small.en there (1.15s vs
+# 3.59s for a 4s clip) and is about a third the download size, at a real
+# but modest accuracy cost -- an explicit trade a user asked for after
+# comparing against the Mac build's speed. WINGVOX_WHISPER_MODEL is still
+# there to go back to small.en/small (or up to medium/large) for anyone
+# who'd rather trade the speed back for accuracy.
+#
+# base.en (English-only) and base (multilingual) are the same size/speed
 # class -- the only difference is language coverage -- so there's no CPU-
 # latency cost to picking the right one automatically from language.txt,
 # instead of leaving language.txt and WINGVOX_WHISPER_MODEL to be paired up
 # by hand. Previously: setting language.txt to anything but English was
-# silently ineffective on Windows, since small.en can't decode other
-# languages no matter what language= is passed to transcribe() -- confirmed
-# by a real user, who got fluent-sounding nonsense (Portuguese transcribed
-# as vaguely-similar-sounding English words) rather than an error.
+# silently ineffective on Windows, since an .en-suffixed model can't decode
+# other languages no matter what language= is passed to transcribe() --
+# confirmed by a real user, who got fluent-sounding nonsense (Portuguese
+# transcribed as vaguely-similar-sounding English words) rather than an
+# error.
 WHISPER_MODEL = os.environ.get(
     "WINGVOX_WHISPER_MODEL",
-    "small.en" if _configured_language() == "en" else "small",
+    "base.en" if _configured_language() == "en" else "base",
 )
 
 _model = None

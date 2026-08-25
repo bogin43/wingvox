@@ -69,5 +69,11 @@ pyperclip; sys_platform == "win32"
 # UI Automation client (via comtypes) -- lets text_before_cursor() read text
 # near the caret, the Windows counterpart of Mac's Accessibility-API read.
 uiautomation; sys_platform == "win32"
+# Renders the status pill/waveform overlay -- see overlay_windows.py. Tkinter's
+# own Canvas draws with no antialiasing at all on Windows and its only
+# transparency mechanism is a binary colorkey, not real alpha; Pillow lets
+# each frame be drawn supersampled and downsampled (antialiased edges/text/
+# lines) and pushed through a true per-pixel-alpha layered window instead.
+pillow; sys_platform == "win32"
 # Needed to build Wingvox's onedir .exe (install.ps1's PyInstaller step).
 pyinstaller; sys_platform == "win32"

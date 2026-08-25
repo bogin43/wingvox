@@ -185,7 +185,7 @@ Step "Installing Python dependencies"
 
 # ---------- 6b. Pre-download the Whisper model ----------
 # faster-whisper fetches its weights lazily on first use. Left alone, that
-# download (~1GB for small.en) happens on the very first launch instead --
+# download (~0.15GB for base.en) happens on the very first launch instead --
 # after this script has already said "install complete" -- so Wingvox sits
 # on "Loading speech model..." for minutes with no progress shown anywhere,
 # which reads as a broken install. Pull it here, where the wait is expected
@@ -196,7 +196,7 @@ Step "Installing Python dependencies"
 # stt_windows.py silently pre-downloads the wrong weights, and the first
 # launch downloads all over again -- the exact delay this step exists to
 # remove. install.sh reads stt_mac.WHISPER_REPO the same way.
-Step "Downloading the speech model (about 0.5GB -- one time)"
+Step "Downloading the speech model (about 0.15GB -- one time)"
 & $VenvPy -c @"
 import stt_windows
 from faster_whisper import WhisperModel
