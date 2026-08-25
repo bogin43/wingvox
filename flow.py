@@ -457,105 +457,151 @@ def _resample(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray
 
 
 class Recorder:
+    """Keeps one input stream open for as long as Wingvox runs, rather than
+    opening a fresh sd.InputStream per recording and closing it again on
+    every stop(). Opening a stream carries real, measured startup latency
+    (WASAPI shared-mode negotiation on Windows commonly costs 100-300ms) --
+    against MIN_AUDIO_SECONDS/TAP_MAX_SECONDS (0.3s/0.35s), that was enough
+    to eat a fast, deliberate tap down to almost no captured audio at all,
+    surfacing as "0.0s captured" -> "Too short" for exactly the quick-tap
+    gesture TAP_MAX_SECONDS exists to support. start()/stop() now only
+    toggle whether the callback is appending frames; the underlying stream
+    stays running in between, so the next tap starts collecting immediately
+    instead of waiting on the device to spin back up."""
+
     def __init__(self, on_level=None):
         self._frames = []
         self._stream = None
         self._native_rate = SAMPLE_RATE
         self._lock = threading.Lock()
         self._on_level = on_level
+        self._collecting = False
+        # Set by the stream's finished_callback if PortAudio ever tears it
+        # down on its own (device unplugged, driver reset) -- next start()
+        # then knows to reopen instead of silently collecting from a dead
+        # stream forever.
+        self._stream_broken = False
+
+    def _open_stream(self):
+        """Opens self._stream (candidate-fallback logic, unchanged from the
+        original per-recording open). Caller holds self._lock."""
+        preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
+
+        def _callback(indata, *_):
+            if not self._collecting:
+                return
+            # Cap what a single recording can accumulate. A hotkey that
+            # never delivers its release (the watchdog covers the common
+            # case, but a genuinely stuck physical key doesn't look "up"
+            # to GetAsyncKeyState either) would otherwise grow this list
+            # for as long as the process runs, and then hand Whisper an
+            # hours-long clip to chew through.
+            if len(self._frames) * indata.shape[0] >= MAX_RECORDING_SAMPLES:
+                return
+            self._frames.append(indata.copy())
+            if self._on_level:
+                self._on_level(float(np.sqrt(np.mean(indata**2))))
+
+        def _finished(*_):
+            self._stream_broken = True
+
+        def _open(device, rate):
+            dev_index = device if device is not None else sd.default.device[0]
+            is_wasapi = (
+                _WASAPI_HOSTAPI_INDEX is not None
+                and sd.query_devices(dev_index)["hostapi"] == _WASAPI_HOSTAPI_INDEX
+            )
+            stream = sd.InputStream(
+                device=device,
+                samplerate=rate, channels=1, dtype="float32",
+                callback=_callback, finished_callback=_finished,
+                extra_settings=_WASAPI_SETTINGS if is_wasapi else None,
+            )
+            stream.start()
+            return stream
+
+        # A virtual/VM audio device can fail in several different, even
+        # inconsistent-across-runs ways (invalid sample rate, a format
+        # WASAPI's shared-mode engine rejects, a WDM-KS driver ioctl
+        # error) -- rather than betting everything on the one
+        # "preferred" device, fall through every other available input
+        # device (each tried at 16kHz, then its own native rate) until
+        # one actually opens.
+        candidates = [preferred]
+        if pc.IS_WINDOWS:
+            try:
+                candidates += [
+                    i for i, d in enumerate(sd.query_devices())
+                    if d["max_input_channels"] > 0 and i != preferred
+                ]
+            except Exception:
+                pass
+
+        last_error = None
+        for device in candidates:
+            try:
+                self._native_rate = SAMPLE_RATE
+                self._stream = _open(device, SAMPLE_RATE)
+                self._stream_broken = False
+                return
+            except sd.PortAudioError as e:
+                last_error = e
+            try:
+                info = sd.query_devices(
+                    device if device is not None else sd.default.device[0], "input"
+                )
+                self._native_rate = int(info["default_samplerate"])
+                self._stream = _open(device, self._native_rate)
+                self._stream_broken = False
+                return
+            except Exception as e:
+                last_error = e
+        self._stream = None
+        raise last_error
+
+    def ensure_open(self):
+        """Pre-opens the input stream ahead of the first recording, so even
+        the very first tap after Wingvox starts is instant rather than
+        paying stream-startup cost on that first press. Safe to call more
+        than once; a no-op once a healthy stream is already open. Call
+        during warm-up, not from start() -- start() still needs its own
+        open-if-needed check as a fallback in case this was never called or
+        the stream died in between recordings."""
+        with self._lock:
+            if self._stream is not None and not self._stream_broken:
+                return
+            self._open_stream()
 
     def start(self):
         with self._lock:
+            if self._stream is None or self._stream_broken:
+                # Closing a broken stream before replacing it: best-effort,
+                # matching stop()'s reasoning below -- a dead stream's mic
+                # handle should be released before opening a new one, but a
+                # failure here must not stop the reopen attempt.
+                if self._stream is not None:
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
+                self._open_stream()
             self._frames = []
-            self._native_rate = SAMPLE_RATE
-            preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
-
-            def _callback(indata, *_):
-                # Cap what a single recording can accumulate. A hotkey that
-                # never delivers its release (the watchdog covers the common
-                # case, but a genuinely stuck physical key doesn't look "up"
-                # to GetAsyncKeyState either) would otherwise grow this list
-                # for as long as the process runs, and then hand Whisper an
-                # hours-long clip to chew through.
-                if len(self._frames) * indata.shape[0] >= MAX_RECORDING_SAMPLES:
-                    return
-                self._frames.append(indata.copy())
-                if self._on_level:
-                    self._on_level(float(np.sqrt(np.mean(indata**2))))
-
-            def _open(device, rate):
-                dev_index = device if device is not None else sd.default.device[0]
-                is_wasapi = (
-                    _WASAPI_HOSTAPI_INDEX is not None
-                    and sd.query_devices(dev_index)["hostapi"] == _WASAPI_HOSTAPI_INDEX
-                )
-                stream = sd.InputStream(
-                    device=device,
-                    samplerate=rate, channels=1, dtype="float32",
-                    callback=_callback,
-                    extra_settings=_WASAPI_SETTINGS if is_wasapi else None,
-                )
-                stream.start()
-                return stream
-
-            # A virtual/VM audio device can fail in several different, even
-            # inconsistent-across-runs ways (invalid sample rate, a format
-            # WASAPI's shared-mode engine rejects, a WDM-KS driver ioctl
-            # error) -- rather than betting everything on the one
-            # "preferred" device, fall through every other available input
-            # device (each tried at 16kHz, then its own native rate) until
-            # one actually opens.
-            candidates = [preferred]
-            if pc.IS_WINDOWS:
-                try:
-                    candidates += [
-                        i for i, d in enumerate(sd.query_devices())
-                        if d["max_input_channels"] > 0 and i != preferred
-                    ]
-                except Exception:
-                    pass
-
-            last_error = None
-            for device in candidates:
-                try:
-                    self._native_rate = SAMPLE_RATE
-                    self._stream = _open(device, SAMPLE_RATE)
-                    return
-                except sd.PortAudioError as e:
-                    last_error = e
-                try:
-                    info = sd.query_devices(
-                        device if device is not None else sd.default.device[0], "input"
-                    )
-                    self._native_rate = int(info["default_samplerate"])
-                    self._stream = _open(device, self._native_rate)
-                    return
-                except Exception as e:
-                    last_error = e
-            self._stream = None
-            raise last_error
+            self._collecting = True
 
     def stop(self) -> np.ndarray:
         with self._lock:
-            if self._stream is None:
-                return np.zeros(0, dtype=np.float32)
-            # Clear self._stream before attempting to actually stop/close it,
-            # not after -- on a flaky driver (this session directly hit
-            # WDM-KS ioctl errors) stream.stop()/close() can raise, and if
-            # self._stream were only cleared on the success path, the next
-            # start() would silently overwrite the reference to this broken
-            # stream without ever closing it: an orphaned stream with its mic
-            # handle never released, which can make the next recording fail
-            # to acquire the microphone at all. Best-effort cleanup instead.
-            stream, self._stream = self._stream, None
-            try:
-                stream.stop()
-            except Exception:
-                pass
-            try:
-                stream.close()
-            except Exception:
-                pass
+            self._collecting = False
+            if self._stream_broken:
+                # Best-effort cleanup of a stream PortAudio already tore
+                # down on its own -- the next start() reopens either way,
+                # this just releases the dead handle promptly rather than
+                # waiting for garbage collection.
+                if self._stream is not None:
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
+                    self._stream = None
             if not self._frames:
                 return np.zeros(0, dtype=np.float32)
             audio = np.concatenate(self._frames)[:, 0]
@@ -1122,6 +1168,17 @@ def run():
         # simply be stopped. Either way the user shouldn't need to know
         # Ollama exists.
         launched = not ollama_available() and pc.start_ollama_background()
+
+        # Opens the mic stream now rather than leaving it to the first
+        # press -- see Recorder's docstring for why a cold stream open on
+        # every recording was the actual cause of taps getting cut down to
+        # "0.0s captured". A failure here isn't fatal: start() still opens
+        # (or reopens) the stream itself on the first real press, this is
+        # purely so that first press doesn't pay the cost start() would.
+        try:
+            recorder.ensure_open()
+        except Exception as e:
+            print(f"  ⚠ Couldn't pre-open the microphone ({e}) -- will retry on first press")
 
         status("Loading speech model…", "gray")
         try:

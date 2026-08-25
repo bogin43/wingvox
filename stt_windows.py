@@ -79,7 +79,7 @@ def run_model(audio, prompt, language="en"):
 
     language is accepted for parity with stt_mac's signature, but has no
     effect on which weights get loaded -- WHISPER_MODEL above already picks
-    "small.en" vs "small" from language.txt at import time, before this is
+    "base.en" vs "base" from language.txt at import time, before this is
     ever called."""
     model = _get_model()
     with _transcribe_lock:

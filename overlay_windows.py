@@ -116,8 +116,11 @@ class _MONITORINFO(ctypes.Structure):
 
 
 def _monitor_rect_under_cursor():
-    """(left, top, right, bottom) of the monitor containing the cursor, in
-    Win32 screen coordinates (origin top-left)."""
+    """(left, top, right, bottom, hmonitor) of the monitor containing the
+    cursor, in Win32 physical screen coordinates (origin top-left) -- these
+    are real physical pixels, not the pre-Per-Monitor-V2 "virtualized"
+    coordinates an unaware process would see, since _make_dpi_aware() above
+    already ran before any window (and so before this is ever called)."""
     pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     MONITOR_DEFAULTTONEAREST = 2
@@ -126,18 +129,46 @@ def _monitor_rect_under_cursor():
     info.cbSize = ctypes.sizeof(_MONITORINFO)
     user32.GetMonitorInfoW(hmon, ctypes.byref(info))
     r = info.rcMonitor
-    return r.left, r.top, r.right, r.bottom
+    return r.left, r.top, r.right, r.bottom, hmon
 
 
-def _rect_for(w, h):
-    left, top, right, bottom = _monitor_rect_under_cursor()
+def _dpi_scale_for_monitor(hmon) -> float:
+    """This monitor's DPI scale relative to 96 ("100%"), e.g. 1.5 at a
+    144 DPI ("150%") setting. Recomputed fresh on every draw (never
+    cached) specifically so a window that moves to a different monitor
+    between one frame and the next always renders at that monitor's
+    actual current scale, rather than whatever scale happened to be
+    current when a value was last cached."""
+    dpi_x = ctypes.c_uint()
+    dpi_y = ctypes.c_uint()
+    MDT_EFFECTIVE_DPI = 0
+    try:
+        shcore.GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+        if dpi_x.value > 0:
+            return dpi_x.value / 96.0
+    except (AttributeError, OSError):
+        pass
+    return 1.0
+
+
+def _rect_for(logical_w, logical_h):
+    """Screen position and actual (DPI-scaled) pixel size for a panel whose
+    *logical* footprint -- i.e. its size at Windows' 96-DPI "100%" baseline
+    -- is logical_w x logical_h. Returns (x, y, scaled_w, scaled_h,
+    dpi_scale) so callers render at the same scale the window is actually
+    placed at, rather than the two ever disagreeing."""
+    left, top, right, bottom, hmon = _monitor_rect_under_cursor()
+    dpi_scale = _dpi_scale_for_monitor(hmon)
+    w = round(logical_w * dpi_scale)
+    h = round(logical_h * dpi_scale)
     x = left + ((right - left) - w) // 2
     # Win32 is top-left origin, unlike Cocoa's bottom-left (where the Mac
     # version's "y = origin.y + 80" means 80px up from the bottom) -- so
     # "80px up from the bottom" here is bottom minus 80 minus the panel
-    # height, not a literal +80.
-    y = bottom - 80 - h
-    return x, y
+    # height, not a literal +80. The 80px gap is itself scaled so it reads
+    # as the same physical distance from the screen edge on every monitor.
+    y = bottom - round(80 * dpi_scale) - h
+    return x, y, w, h, dpi_scale
 
 
 GWL_EXSTYLE = -20
@@ -149,6 +180,7 @@ AC_SRC_ALPHA = 0x01
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
+shcore = ctypes.windll.shcore
 
 
 class _BLENDFUNCTION(ctypes.Structure):
@@ -238,6 +270,56 @@ gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
 gdi32.SelectObject.restype = ctypes.c_void_p
 gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
 gdi32.DeleteObject.restype = wintypes.BOOL
+shcore.GetDpiForMonitor.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+]
+shcore.GetDpiForMonitor.restype = ctypes.c_long
+
+
+def _make_dpi_aware():
+    """Declares Per-Monitor-V2 DPI awareness for the whole process. Must run
+    at module import time, here, before Tkinter's root (or any other
+    window) exists -- DPI awareness can only be set once, before a
+    process's first window is created.
+
+    Without this, Windows treats the process as DPI-unaware and silently
+    bitmap-stretches this window to compensate for whatever DPI it assumes
+    applies -- and that invisible compensation is what actually produced
+    the reported bug: the pill's rendered size and position visibly
+    changing as it moved between monitors with different scale factors
+    (e.g. a laptop panel at 150% next to an external monitor at 100%).
+    Our own geometry math (_rect_for) and Windows' compensating stretch
+    were each assuming a different scale was in charge for the same
+    window, and which one currently "won" depended on which monitor the
+    cursor happened to be on when a frame was drawn.
+
+    Falls through progressively older, less capable awareness APIs for
+    Windows versions where the newer ones aren't available. Even the last
+    resort (plain SetProcessDPIAware, "System DPI Aware") is a real
+    improvement over the unaware default: it stops Windows' per-monitor
+    virtualization outright, though unlike Per-Monitor-V2 it can't track a
+    *change* in DPI as the window later moves to a differently-scaled
+    monitor -- _dpi_scale_for_monitor's own per-draw lookup covers that gap
+    by recomputing the actual monitor's DPI on every frame regardless."""
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+    try:
+        if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return
+    except (AttributeError, OSError):
+        pass
+    PROCESS_PER_MONITOR_DPI_AWARE = 2
+    try:
+        if shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == 0:  # S_OK
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+_make_dpi_aware()
 
 
 def _make_click_through(root):
@@ -321,45 +403,49 @@ def _rounded_rect(draw, x0, y0, x1, y1, radius, fill):
     draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill)
 
 
-def _render_status(text, color, interactive) -> Image.Image:
+def _render_status(text, color, interactive, dpi_scale=1.0) -> Image.Image:
     s = SCALE
-    w, h = PANEL_W * s, PANEL_H * s
+    logical_w = round(PANEL_W * dpi_scale)
+    logical_h = round(PANEL_H * dpi_scale)
+    w, h = logical_w * s, logical_h * s
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     _rounded_rect(draw, 0, 0, w - 1, h - 1, h // 2, BG_CAPSULE)
     fg = COLORS.get(color, COLORS["white"])
+    sc = lambda v: round(v * dpi_scale)  # logical px -> this monitor's physical px
     if interactive:
-        draw.text((MSG_X * s, h / 2), text, font=_font(TEXT_SIZE * s), fill=fg, anchor="lm")
+        draw.text((sc(MSG_X) * s, h / 2), text, font=_font(sc(TEXT_SIZE) * s), fill=fg, anchor="lm")
         for x0, bw, label, bg, btn_fg in (
             (UPDATE_X0, UPDATE_W, "Update", UPDATE_BG, UPDATE_FG),
             (NOTNOW_X0, NOTNOW_W, "Not now", NOTNOW_BG, NOTNOW_FG),
         ):
-            by0 = BTN_Y0 * s
-            bx0, bx1, by1 = x0 * s, (x0 + bw) * s, by0 + BTN_H * s
-            _rounded_rect(draw, bx0, by0, bx1, by1, BTN_H * s // 2, bg)
+            by0, bh = sc(BTN_Y0) * s, sc(BTN_H) * s
+            bx0, bx1, by1 = sc(x0) * s, sc(x0 + bw) * s, by0 + bh
+            _rounded_rect(draw, bx0, by0, bx1, by1, bh // 2, bg)
             draw.text(((bx0 + bx1) / 2, (by0 + by1) / 2), label,
-                      font=_font(BTN_TEXT_SIZE * s), fill=btn_fg, anchor="mm")
+                      font=_font(sc(BTN_TEXT_SIZE) * s), fill=btn_fg, anchor="mm")
     else:
-        draw.text((w / 2, h / 2), text, font=_font(TEXT_SIZE * s), fill=fg, anchor="mm")
-    return img.resize((PANEL_W, PANEL_H), Image.LANCZOS)
+        draw.text((w / 2, h / 2), text, font=_font(sc(TEXT_SIZE) * s), fill=fg, anchor="mm")
+    return img.resize((logical_w, logical_h), Image.LANCZOS)
 
 
-def _render_wave_background() -> Image.Image:
+def _render_wave_background(dpi_scale=1.0) -> Image.Image:
     s = SCALE
-    w, h = WAVE_PANEL_W * s, WAVE_PANEL_H * s
+    w = round(WAVE_PANEL_W * dpi_scale) * s
+    h = round(WAVE_PANEL_H * dpi_scale) * s
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     _rounded_rect(draw, 0, 0, w - 1, h - 1, h // 2, WAVE_BG)
     return img
 
 
-def _render_wave_frame(bg: Image.Image, amp: float, phase: float) -> Image.Image:
+def _render_wave_frame(bg: Image.Image, amp: float, phase: float, dpi_scale=1.0) -> Image.Image:
     s = SCALE
     img = bg.copy()
     draw = ImageDraw.Draw(img)
-    ww = (WAVE_PANEL_W - WAVE_MARGIN * 2) * s
-    hh = (WAVE_PANEL_H - WAVE_MARGIN * 2) * s
-    margin = WAVE_MARGIN * s
+    ww = round((WAVE_PANEL_W - WAVE_MARGIN * 2) * dpi_scale) * s
+    hh = round((WAVE_PANEL_H - WAVE_MARGIN * 2) * dpi_scale) * s
+    margin = round(WAVE_MARGIN * dpi_scale) * s
     cy = margin + hh / 2.0
     max_amp = hh * 0.48
     line_amp_base = amp * max_amp
@@ -377,8 +463,11 @@ def _render_wave_frame(bg: Image.Image, amp: float, phase: float) -> Image.Image
                 for freq, weight in WAVE_COMPONENTS
             )
             pts.append((x, y))
-        draw.line(pts, fill=(255, 255, 255, WAVE_LINE_ALPHA), width=WAVE_LINE_WIDTH * s // 2, joint="curve")
-    return img.resize((WAVE_PANEL_W, WAVE_PANEL_H), Image.LANCZOS)
+        line_w = max(1, round(WAVE_LINE_WIDTH * dpi_scale)) * s // 2
+        draw.line(pts, fill=(255, 255, 255, WAVE_LINE_ALPHA), width=line_w, joint="curve")
+    logical_w = round(WAVE_PANEL_W * dpi_scale)
+    logical_h = round(WAVE_PANEL_H * dpi_scale)
+    return img.resize((logical_w, logical_h), Image.LANCZOS)
 
 
 class StatusOverlay:
@@ -400,7 +489,12 @@ class StatusOverlay:
         self._notnow_btn_rect = None
         self._last_text = ""           # for _resolve_click's button-only redraw
         self._last_color = "white"
-        self._wave_bg = _render_wave_background()
+        # Rendered lazily in _draw_recording_frame, keyed to the dpi_scale it
+        # was rendered at -- see that method for why this can't just be
+        # rendered once here at a fixed, assumed scale.
+        self._wave_bg = None
+        self._wave_dpi_scale = None
+        self._dpi_scale = 1.0  # updated by _position() on every draw
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
@@ -479,23 +573,30 @@ class StatusOverlay:
         _set_click_through(self._hwnd, True)
         self.root.withdraw()
 
-    def _position(self, w, h):
-        x, y = _rect_for(w, h)
+    def _position(self, logical_w, logical_h):
+        """logical_w/h are the panel's 96-DPI ("100%") size. Positions and
+        sizes the root window for whichever monitor the cursor is on right
+        now, and returns that monitor's dpi_scale so the caller renders at
+        the same scale the window was actually placed at -- see _rect_for's
+        docstring for why those two must never disagree."""
+        x, y, w, h, dpi_scale = _rect_for(logical_w, logical_h)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-        return x, y
+        self._dpi_scale = dpi_scale
+        return dpi_scale
 
     def _draw_status(self, text, color, on_click=None):
-        self._position(PANEL_W, PANEL_H)
+        dpi_scale = self._position(PANEL_W, PANEL_H)
         self._last_text, self._last_color = text, color
         self._on_click = on_click
         interactive = on_click is not None
         if interactive:
-            y0 = int(BTN_Y0)
-            self._update_btn_rect = (UPDATE_X0, y0, UPDATE_X0 + UPDATE_W, y0 + BTN_H)
-            self._notnow_btn_rect = (NOTNOW_X0, y0, NOTNOW_X0 + NOTNOW_W, y0 + BTN_H)
+            sc = lambda v: round(v * dpi_scale)
+            y0 = sc(BTN_Y0)
+            self._update_btn_rect = (sc(UPDATE_X0), y0, sc(UPDATE_X0 + UPDATE_W), y0 + sc(BTN_H))
+            self._notnow_btn_rect = (sc(NOTNOW_X0), y0, sc(NOTNOW_X0 + NOTNOW_W), y0 + sc(BTN_H))
         else:
             self._update_btn_rect = self._notnow_btn_rect = None
-        _push_layered_frame(self._hwnd, _render_status(text, color, interactive))
+        _push_layered_frame(self._hwnd, _render_status(text, color, interactive, dpi_scale))
         _set_click_through(self._hwnd, not interactive)
         self.root.deiconify()
 
@@ -524,7 +625,10 @@ class StatusOverlay:
         self._update_btn_rect = self._notnow_btn_rect = None
         _set_click_through(self._hwnd, True)
         if cb is not None:
-            _push_layered_frame(self._hwnd, _render_status(text, color, False))
+            # Reuses self._dpi_scale rather than re-querying the monitor:
+            # the window isn't being repositioned here, so the render must
+            # match whatever scale _position() last actually placed it at.
+            _push_layered_frame(self._hwnd, _render_status(text, color, False, self._dpi_scale))
             cb()
         else:
             self.root.withdraw()
@@ -537,7 +641,15 @@ class StatusOverlay:
         self._resolve_click(None)
 
     def _draw_recording_frame(self):
-        self._position(WAVE_PANEL_W, WAVE_PANEL_H)
+        dpi_scale = self._position(WAVE_PANEL_W, WAVE_PANEL_H)
+        # The wave background is cached across ticks (regenerating a static
+        # rounded-rect on every 20Hz tick would be wasted work), but a fixed
+        # cache would go stale the moment this window moves to a
+        # differently-scaled monitor between recordings -- regenerate
+        # whenever the scale actually changes, not just once ever.
+        if self._wave_bg is None or self._wave_dpi_scale != dpi_scale:
+            self._wave_bg = _render_wave_background(dpi_scale)
+            self._wave_dpi_scale = dpi_scale
         self._on_click = None
         self._update_btn_rect = self._notnow_btn_rect = None
         _set_click_through(self._hwnd, True)
@@ -554,7 +666,9 @@ class StatusOverlay:
             self._smoothed = self._smoothed * 0.75 + lvl * 0.25  # slow release
         amp = min(1.0, self._smoothed / MAX_AMPLITUDE_THRESHOLD)
         self._phase += 0.05 + amp * 0.22
-        _push_layered_frame(self._hwnd, _render_wave_frame(self._wave_bg, amp, self._phase))
+        _push_layered_frame(
+            self._hwnd, _render_wave_frame(self._wave_bg, amp, self._phase, self._wave_dpi_scale)
+        )
 
 
 def _point_in_rect(x, y, rect):
