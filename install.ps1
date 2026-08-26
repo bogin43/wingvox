@@ -27,7 +27,30 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 }
 Write-Host "    OK -- winget available."
 
-# ---------- 2. Python 3.12 (x64, specifically) ----------
+# ---------- 2. Visual C++ Redistributable ----------
+# onnxruntime (faster-whisper's VAD filter dependency, see stt_windows.py's
+# vad_filter=True) links against msvcp140_1.dll/vcruntime140_1.dll, which
+# ship in this redistributable, not in Windows itself. A machine that's
+# never had Visual-Studio-built software installed on it won't have these:
+# confirmed on a fresh Windows box where onnxruntime failed to import with
+# "DLL load failed" even though everything upstream of it -- Python, pip,
+# faster-whisper's own install -- succeeded without a single error. That
+# failure only surfaces the first time Wingvox actually tries to transcribe
+# something, well after this script has already said "install complete", so
+# install it here where a failure is visible and attributable.
+Step "Checking for the Visual C++ Redistributable"
+if (Test-Path "$env:WINDIR\System32\msvcp140_1.dll") {
+    Write-Host "    OK -- already installed."
+} else {
+    Write-Host "    Not found -- installing via winget."
+    winget install --id Microsoft.VCRedist.2015+.x64 -e --source winget --accept-package-agreements --accept-source-agreements
+    if (-not (Test-Path "$env:WINDIR\System32\msvcp140_1.dll")) {
+        Write-Error "Visual C++ Redistributable install didn't produce msvcp140_1.dll. Install it manually from https://aka.ms/vs/17/release/vc_redist.x64.exe and re-run this script."
+        exit 1
+    }
+}
+
+# ---------- 3. Python 3.12 (x64, specifically) ----------
 Step "Checking for Python 3.12 (x64)"
 # faster-whisper's ctranslate2 dependency doesn't publish Windows ARM64
 # wheels -- only win_amd64. On an ARM64 Windows machine (Surface Pro X/
@@ -64,63 +87,88 @@ if (-not $pythonOk) {
 $PythonBin = "py"
 $PythonArgs = @("-3.12-64")
 
-# ---------- 3. Ollama ----------
-Step "Checking for Ollama"
-if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-    Write-Host "    Not found -- installing via winget."
-    winget install --id Ollama.Ollama -e --source winget --accept-package-agreements --accept-source-agreements
-    # winget installs to a per-user path not yet on PATH in this session.
-    $env:Path = "$env:LOCALAPPDATA\Programs\Ollama;$env:Path"
-}
-# Resolve the full exe path rather than relying on bare "ollama" -- PATH
-# resolution has proven unreliable right after a fresh winget install in
-# the same session.
-$ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue).Source
-if (-not $ollamaExe) { $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" }
+# ---------- 4 & 5. Ollama and the cleanup model ----------
+# WINGVOX_LITE=1 skips both, mirroring install.sh. The cleanup model is
+# ~2GB of the ~3.5GB install, so leaving it out is the difference between a
+# ~1.5GB download and a ~3.5GB one. Dictation still works: Whisper already
+# produces punctuated text, and flow.py falls back to pasting the raw
+# transcript whenever the cleanup step is unavailable. What you lose is
+# filler removal ("um", "so like", false starts) and tidier sentence
+# boundaries.
+$WingvoxLite = $env:WINGVOX_LITE -eq "1"
+$PullJob = $null
+if ($WingvoxLite) {
+    Step "Skipping Ollama (WINGVOX_LITE=1)"
+    Write-Host "    Dictation will paste raw transcripts, without the cleanup pass."
+    Write-Host "    To add it later, re-run this installer without WINGVOX_LITE."
+} else {
+    Step "Checking for Ollama"
+    if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+        Write-Host "    Not found -- installing via winget."
+        winget install --id Ollama.Ollama -e --source winget --accept-package-agreements --accept-source-agreements
+        # winget installs to a per-user path not yet on PATH in this session.
+        $env:Path = "$env:LOCALAPPDATA\Programs\Ollama;$env:Path"
+    }
+    # Resolve the full exe path rather than relying on bare "ollama" -- PATH
+    # resolution has proven unreliable right after a fresh winget install in
+    # the same session.
+    $ollamaExe = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+    if (-not $ollamaExe) { $ollamaExe = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe" }
 
-# Earlier versions registered a "Wingvox-Ollama" logon task running
-# `ollama.exe serve`. ollama.exe is a CONSOLE-subsystem binary, so that put a
-# terminal window on screen at every logon -- and closing it, the obvious
-# thing to do with a stray terminal, killed Ollama and silently downgraded
-# Wingvox to pasting raw uncleaned transcripts. Wingvox now starts Ollama
-# itself, windowless and detached (see start_ollama_background in
-# platform_compat.py), so remove the old task on upgrade. The /delete
-# legitimately "fails" when there's nothing to remove.
-try { schtasks /delete /tn "Wingvox-Ollama" /f 2>$null | Out-Null } catch {}
+    # Earlier versions registered a "Wingvox-Ollama" logon task running
+    # `ollama.exe serve`. ollama.exe is a CONSOLE-subsystem binary, so that put a
+    # terminal window on screen at every logon -- and closing it, the obvious
+    # thing to do with a stray terminal, killed Ollama and silently downgraded
+    # Wingvox to pasting raw uncleaned transcripts. Wingvox now starts Ollama
+    # itself, windowless and detached (see start_ollama_background in
+    # platform_compat.py), so remove the old task on upgrade. The /delete
+    # legitimately "fails" when there's nothing to remove.
+    try { schtasks /delete /tn "Wingvox-Ollama" /f 2>$null | Out-Null } catch {}
 
-try {
-    Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
-} catch {
-    Write-Host "    Starting Ollama..."
-    # Only needed so `ollama pull` below has a server to talk to -- this one
-    # is transient and hidden. -WindowStyle Hidden with no redirected std
-    # handles can silently fail to spawn in a non-interactive session (no
-    # window station to attach to), so redirect to files.
-    Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\wingvox_ollama_stdout.log" -RedirectStandardError "$env:TEMP\wingvox_ollama_stderr.log"
-}
-Write-Host -NoNewline "    Waiting for Ollama to come up"
-$ollamaReady = $false
-for ($i = 1; $i -le 20; $i++) {
     try {
         Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
-        Write-Host " -- ready."
-        $ollamaReady = $true
-        break
     } catch {
-        Write-Host -NoNewline "."
-        Start-Sleep -Seconds 1
+        Write-Host "    Starting Ollama..."
+        # Only needed so `ollama pull` below has a server to talk to -- this one
+        # is transient and hidden. -WindowStyle Hidden with no redirected std
+        # handles can silently fail to spawn in a non-interactive session (no
+        # window station to attach to), so redirect to files.
+        Start-Process -FilePath $ollamaExe -ArgumentList "serve" -WindowStyle Hidden -RedirectStandardOutput "$env:TEMP\wingvox_ollama_stdout.log" -RedirectStandardError "$env:TEMP\wingvox_ollama_stderr.log"
     }
-}
-if (-not $ollamaReady) {
-    Write-Error "Ollama didn't come up after 20s. Launch the Ollama app manually and re-run this script."
-    exit 1
+    Write-Host -NoNewline "    Waiting for Ollama to come up"
+    $ollamaReady = $false
+    for ($i = 1; $i -le 20; $i++) {
+        try {
+            Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/version" -TimeoutSec 2 | Out-Null
+            Write-Host " -- ready."
+            $ollamaReady = $true
+            break
+        } catch {
+            Write-Host -NoNewline "."
+            Start-Sleep -Seconds 1
+        }
+    }
+    if (-not $ollamaReady) {
+        Write-Error "Ollama didn't come up after 20s. Launch the Ollama app manually and re-run this script."
+        exit 1
+    }
+
+    # The ~2GB cleanup model is the longest single step in the install and
+    # nothing between here and the background-task registration needs it, so
+    # it runs in the background while the venv, the Whisper download and the
+    # exe build all proceed -- mirrors install.sh's PULL_PID handling.
+    # Collected at step 6c below. Output goes to a log file rather than the
+    # console: two progress streams interleaved is unreadable, and the
+    # failure text is more useful shown in one piece at the end.
+    Step "Pulling the qwen2.5:3b cleanup model in the background (about 2GB)"
+    $PullStdout = "$env:TEMP\wingvox_pull_stdout.log"
+    $PullStderr = "$env:TEMP\wingvox_pull_stderr.log"
+    $PullJob = Start-Process -FilePath $ollamaExe -ArgumentList "pull", "qwen2.5:3b" `
+        -WindowStyle Hidden -RedirectStandardOutput $PullStdout -RedirectStandardError $PullStderr -PassThru
+    Write-Host "    Started -- the rest of the install continues while it downloads."
 }
 
-# ---------- 4. Pull the cleanup model ----------
-Step "Pulling the qwen2.5:3b cleanup model (this may take a while on first run)"
-ollama pull qwen2.5:3b
-
-# ---------- 5. Python virtual environment ----------
+# ---------- 6. Python virtual environment ----------
 Step "Setting up the Python environment"
 $VenvDir = Join-Path $RepoDir "venv"
 if (-not (Test-Path $VenvDir)) {
@@ -135,9 +183,9 @@ Step "Installing Python dependencies"
 & $VenvPy -m pip install --upgrade pip -q
 & $VenvPy -m pip install -r requirements.txt -q
 
-# ---------- 5b. Pre-download the Whisper model ----------
+# ---------- 6b. Pre-download the Whisper model ----------
 # faster-whisper fetches its weights lazily on first use. Left alone, that
-# download (~1GB for small.en) happens on the very first launch instead --
+# download (~0.15GB for base.en) happens on the very first launch instead --
 # after this script has already said "install complete" -- so Wingvox sits
 # on "Loading speech model..." for minutes with no progress shown anywhere,
 # which reads as a broken install. Pull it here, where the wait is expected
@@ -148,7 +196,7 @@ Step "Installing Python dependencies"
 # stt_windows.py silently pre-downloads the wrong weights, and the first
 # launch downloads all over again -- the exact delay this step exists to
 # remove. install.sh reads stt_mac.WHISPER_REPO the same way.
-Step "Downloading the speech model (about 1GB -- one time)"
+Step "Downloading the speech model (about 0.15GB -- one time)"
 & $VenvPy -c @"
 import stt_windows
 from faster_whisper import WhisperModel
@@ -162,7 +210,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "    but the first dictation will be slow. Check your connection."
 }
 
-# ---------- 6. Default glossary ----------
+# ---------- 7. Default glossary ----------
 Step "Setting up dictionary.txt"
 $DataDir = Join-Path $env:LOCALAPPDATA "Wingvox"
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
@@ -175,7 +223,43 @@ if (-not (Test-Path $DictPath)) {
     Write-Host "    dictionary.txt already exists, leaving it as-is."
 }
 
-# ---------- 7. Build Wingvox.exe ----------
+# ---------- 7b. Finish the background cleanup-model download ----------
+# Everything above this point overlapped the download. Wait for it here, so
+# Wingvox starts with the cleanup model already in place rather than warning
+# about a missing model for the first few minutes of its life. No-op when
+# WINGVOX_LITE skipped starting it in the first place.
+if ($PullJob -ne $null) {
+    Step "Finishing the cleanup model download"
+    Write-Host "    Waiting for qwen2.5:3b (already running since step 4)..."
+    $PullJob.WaitForExit()
+    if ($PullJob.ExitCode -eq 0) {
+        Write-Host "    OK -- cleanup model ready."
+    } else {
+        Write-Host "    WARNING: the cleanup model didn't download. Output follows:"
+        Get-Content $PullStderr -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+        Write-Host "    Not fatal: dictation still works, it just pastes raw"
+        Write-Host "    transcripts without the cleanup pass. To fix it later:"
+        Write-Host "      ollama pull qwen2.5:3b"
+    }
+}
+
+# ---------- 8. Stop Wingvox if it's currently running ----------
+# Matters on a re-run (a manual re-install, or update.ps1's click-to-update
+# path): the build below deletes and recreates dist\, but a currently-running
+# Wingvox.exe holds its own binary open, so Remove-Item would fail with
+# "file in use" rather than silently succeeding. Same stop sequence as
+# wingvox-off.cmd. Harmless no-op on a first-time install where nothing is
+# running yet -- /end and taskkill legitimately "fail" when there's no task
+# or no running process, so their errors are swallowed rather than fatal.
+Step "Stopping Wingvox if it's currently running"
+try { schtasks /end /tn Wingvox 2>$null | Out-Null } catch {}
+try { taskkill /im Wingvox.exe /f 2>$null | Out-Null } catch {}
+for ($i = 0; $i -lt 20; $i++) {
+    if (-not (Get-Process Wingvox -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 250
+}
+
+# ---------- 9. Build Wingvox.exe ----------
 Step "Building Wingvox.exe"
 Remove-Item -Recurse -Force (Join-Path $RepoDir "build") -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $RepoDir "dist") -ErrorAction SilentlyContinue
@@ -187,25 +271,106 @@ if (-not (Test-Path $ExePath)) {
 }
 Write-Host "    Built $ExePath"
 
-# ---------- 8. Background task ----------
+# ---------- 10. Background task ----------
 Step "Installing the background task"
-$TaskXmlTemplate = Join-Path $RepoDir "wingvox_task.xml.template"
-$TaskXmlPath = Join-Path $RepoDir "wingvox_task.xml"
-$TaskXmlContent = (Get-Content $TaskXmlTemplate -Raw) `
-    -replace "__EXE_PATH__", $ExePath `
-    -replace "__REPO_DIR__", $RepoDir
-# schtasks' XML importer wants UTF-16 specifically -- both UTF-8 with a BOM
-# ("incorrect document syntax") and UTF-8 without one ("unable to switch the
-# encoding") were rejected. Match the template's declared encoding exactly.
-[System.IO.File]::WriteAllText($TaskXmlPath, $TaskXmlContent, [System.Text.Encoding]::Unicode)
+# Registering a *new* Task Scheduler task via `schtasks /create /xml` fails
+# with "Access is denied" on a real (non-elevated) admin-account Windows
+# session, which every default single-user Windows install is -- confirmed
+# by reproducing it directly, and confirmed that adding an explicit
+# <UserId> to the task XML does NOT fix it either. The denial happens on
+# schtasks.exe's own XML-import path specifically. Register-ScheduledTask
+# (the newer Task Scheduler API, via CIM/WMI rather than schtasks.exe's XML
+# importer) registers the identical task with no elevation prompt at all --
+# confirmed working on the same machine, same account, same task
+# definition. That's the actual fix, not a fallback: use the cmdlet, not
+# schtasks/xml. It also throws a real terminating PowerShell exception on
+# failure instead of a discarded stderr string, so a failure here can't
+# silently read as success the way the old schtasks-based version did.
+# A task last (re-)created through an elevated path -- e.g. an older
+# Wingvox version's schtasks/xml-plus-UAC-retry install, or anything else
+# that happened to touch it while elevated -- can end up needing elevation
+# to unregister too, even though creating a brand-new task with this
+# script's own Register-ScheduledTask call never does. Confirmed directly:
+# Unregister-ScheduledTask on such a task fails with "Access is denied",
+# and swallowing that silently (the previous behavior here) meant the
+# subsequent Register-ScheduledTask failed too, with a confusing "Cannot
+# create a file when that file already exists" -- the real cause (a
+# leftover task blocking the new one) was invisible. Retry the removal
+# once, elevated, rather than leaving that failure silent.
+try {
+    Unregister-ScheduledTask -TaskName Wingvox -Confirm:$false -ErrorAction Stop
+} catch {
+    if (Get-ScheduledTask -TaskName Wingvox -ErrorAction SilentlyContinue) {
+        Write-Host "    Removing an old version of the task needs administrator approval -- a Windows prompt is coming."
+        Start-Process powershell -ArgumentList @(
+            "-NoProfile", "-Command",
+            "Unregister-ScheduledTask -TaskName Wingvox -Confirm:`$false"
+        ) -Verb RunAs -Wait -WindowStyle Hidden
+    }
+}
+try {
+    $userId = "$env:USERDOMAIN\$env:USERNAME"
+    $action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $RepoDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -Priority 7 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName Wingvox -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings `
+        -Description "Wingvox push-to-talk dictation background service" -ErrorAction Stop | Out-Null
+    Start-ScheduledTask -TaskName Wingvox
+    Write-Host "    Wingvox will now start automatically every time you log in."
+} catch {
+    Write-Host "    WARNING: couldn't register the background task ($($_.Exception.Message))."
+    Write-Host "    Wingvox is built but won't start automatically at login. Run this"
+    Write-Host "    script again, or launch it by hand each time from: $ExePath"
+}
 
-# /delete legitimately "fails" (no existing task) on a first-ever install --
-# $ErrorActionPreference = "Stop" turns that expected stderr output into a
-# terminating error unless it's caught explicitly.
-try { schtasks /delete /tn Wingvox /f 2>$null | Out-Null } catch {}
-schtasks /create /tn Wingvox /xml $TaskXmlPath /f | Out-Null
-schtasks /run /tn Wingvox | Out-Null
-Write-Host "    Wingvox will now start automatically every time you log in."
+# ---------- 11. Updater task (for click-to-update) ----------
+# A second, trigger-less task that only ever runs on demand (Start-ScheduledTask,
+# called from platform_compat.run_update() when the status pill's Update button
+# is clicked). It has to be a SEPARATE task, not a plain child process of
+# Wingvox.exe: confirmed by reproduction that Windows denies
+# CREATE_BREAKAWAY_FROM_JOB ("Access is denied", WinError 5) for a process
+# launched from inside Wingvox's own Task-Scheduler job on at least some
+# Windows configurations, which would otherwise mean update.ps1 -- which
+# stops and rebuilds Wingvox.exe partway through -- gets torn down along with
+# the very process that spawned it, before the rebuild ever finishes. A
+# separate top-level scheduled task has no such parent/job relationship to
+# Wingvox.exe at all, so stopping Wingvox has no effect on it.
+Step "Installing the updater task"
+try {
+    Unregister-ScheduledTask -TaskName Wingvox-Updater -Confirm:$false -ErrorAction Stop
+} catch {
+    if (Get-ScheduledTask -TaskName Wingvox-Updater -ErrorAction SilentlyContinue) {
+        Write-Host "    Removing an old version of the updater task needs administrator approval -- a Windows prompt is coming."
+        Start-Process powershell -ArgumentList @(
+            "-NoProfile", "-Command",
+            "Unregister-ScheduledTask -TaskName Wingvox-Updater -Confirm:`$false"
+        ) -Verb RunAs -Wait -WindowStyle Hidden
+    }
+}
+try {
+    $updateScript = Join-Path $RepoDir "update.ps1"
+    $updaterAction = New-ScheduledTaskAction -Execute "powershell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$updateScript`"" `
+        -WorkingDirectory $RepoDir
+    $updaterPrincipal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $updaterSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
+    Register-ScheduledTask -TaskName Wingvox-Updater -Action $updaterAction `
+        -Principal $updaterPrincipal -Settings $updaterSettings `
+        -Description "Runs Wingvox's update.ps1 on demand, independent of the main Wingvox task" `
+        -ErrorAction Stop | Out-Null
+    Write-Host "    Updater task ready."
+} catch {
+    Write-Host "    WARNING: couldn't register the updater task ($($_.Exception.Message))."
+    Write-Host "    Clicking Update on the status pill won't work until this script is"
+    Write-Host "    re-run successfully; update.ps1 can still be run by hand."
+}
 
 # ---------- Done ----------
 Step "Install complete"
@@ -220,13 +385,21 @@ Write-Host "check Settings > Privacy & security > Microphone and make sure"
 Write-Host "  $ExePath"
 Write-Host "(or 'Wingvox') is allowed."
 Write-Host ""
-Write-Host "Opening the setup guide now..."
-# Render SETUP.md to HTML first -- opening the .md directly hands a raw
-# markdown file to Notepad, which is a wall of pipes and asterisks at
-# exactly the moment the user needs clear instructions.
-$SetupHtml = Join-Path $RepoDir "setup.html"
-& $VenvPy (Join-Path $RepoDir "make_setup_html.py") 2>$null | Out-Null
-$guide = if (Test-Path $SetupHtml) { $SetupHtml } else { Join-Path $RepoDir "SETUP.md" }
-try { Start-Process $guide } catch {
-    Write-Host "    (Couldn't auto-open it -- read it directly at $guide instead.)"
+if ($env:WINGVOX_UPDATE -eq "1") {
+    # Set by update.ps1 when it hands off here to rebuild+restart after a
+    # pull -- this run is a background update, not someone sitting at this
+    # install for the first time, so a browser window suddenly popping open
+    # with the setup guide would be a surprise, not a help.
+    Write-Host "Update complete."
+} else {
+    Write-Host "Opening the setup guide now..."
+    # Render SETUP.md to HTML first -- opening the .md directly hands a raw
+    # markdown file to Notepad, which is a wall of pipes and asterisks at
+    # exactly the moment the user needs clear instructions.
+    $SetupHtml = Join-Path $RepoDir "setup.html"
+    & $VenvPy (Join-Path $RepoDir "make_setup_html.py") 2>$null | Out-Null
+    $guide = if (Test-Path $SetupHtml) { $SetupHtml } else { Join-Path $RepoDir "SETUP.md" }
+    try { Start-Process $guide } catch {
+        Write-Host "    (Couldn't auto-open it -- read it directly at $guide instead.)"
+    }
 }

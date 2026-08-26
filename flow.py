@@ -10,7 +10,7 @@ Usage:
   python flow.py test-inject "hello"            paste text into focused app in 3s
   python flow.py add-correction "wrong text" "right text"   fix a recurring mis-transcription
   python flow.py check-update  see whether a newer version has been published
-  python flow.py set-hotkey right|left   choose the Option key that starts dictation (Mac only)
+  python flow.py set-hotkey   tap the key you'd like to use to start dictation
   python flow.py set-language fr   dictate in a language other than English (e.g. fr, nl for Dutch/Flemish)
 """
 
@@ -24,6 +24,7 @@ import time
 import types
 from pathlib import Path
 
+import hotkey_picker
 import notice
 import platform_compat as pc
 
@@ -73,6 +74,19 @@ WINGVOX_VERSION = "0.1.0"
 
 SAMPLE_RATE = 16000
 
+# Below this, a recording is a mis-tap (hotkey released before any speech
+# could register) rather than genuine silence -- process() checks this
+# directly, distinctly from transcribe()'s own identical check, so the two
+# cases can show the user different, actionable messages instead of both
+# collapsing into an unhelpful "Heard nothing" that sends someone chasing a
+# microphone-permission problem that was never the issue.
+MIN_AUDIO_SECONDS = 0.3
+
+# No cap on how long a single recording can run -- tap-to-lock exists
+# specifically so someone can dictate a long passage hands-free, and a
+# fixed ceiling here fights that directly (a real hands-free dictation hit
+# the old 180s/3min cap and silently stopped picking up new audio, with no
+# visible sign anything had changed).
 
 # Whisper's initial_prompt is capped at 224 tokens and silently truncates
 # past that, so an over-long glossary both stops helping and starts crowding
@@ -181,7 +195,7 @@ translate it, even partially, even if English feels more natural to you. A trans
 French; a transcript in Dutch stays Dutch. Apply that language's own capitalization, punctuation and \
 spacing conventions when fixing mechanics, not English's.
 
-Only two kinds of edits are allowed — nothing else:
+Only these kinds of edits are allowed — nothing else:
 1. Delete disfluencies: filler words/sounds (um, uh, mmm, like used as filler, "you know"), false starts, \
 and immediate word/phrase repetitions.
 2. Fix mechanics only: capitalization, punctuation, and sentence boundaries. Never leave a sentence without \
@@ -197,13 +211,32 @@ you sign up, you'll get access." "Honestly, that surprised me.")
    - Add commas between three or more items in a list, including before the final "and"/"or".
    - Capitalize proper nouns the words already imply even if spoken lowercase — names, places, days of \
 the week, and months ("friday" -> "Friday").
+3. Resolve a genuine self-correction: when the speaker restates something they just said with a different \
+answer — a different number, name, choice, or detail — because they changed their mind or misspoke, output \
+ONE complete, standalone sentence built on the original sentence's own subject and structure, with only the \
+corrected detail swapped in and the replaced part dropped. Replace the smallest piece that's actually being \
+corrected, not the whole sentence around it — in a list, that's only the item right next to the correction, \
+every other item the speaker already said stays ("let's get some chicken and rice, or I mean beans" corrects \
+only "rice", so "chicken" is still wanted and has to stay: "Let's get some chicken and beans," not "Let's get \
+some beans"). Never just paste the correction's own fragment by itself if that loses the original subject or \
+wouldn't make sense to someone who never saw the deleted part ("my favorite food is chicken, oh wait, it's \
+actually french fries" has to come out as "My favorite food is french fries," not "It's actually french \
+fries" — that "it's" refers to something that's no longer there, and "actually" isn't answering anything \
+anymore). Judge this by meaning, not by matching specific phrases. \
+Words like "no wait," "actually," "I mean," or "sorry" are common signals but not proof by themselves — the \
+same words said as real content the speaker means to keep (dictating them on purpose, quoting them, talking \
+about them) are not a correction and must stay exactly as spoken. When it's genuinely unclear whether \
+something is a correction or just content, treat it as content and leave it in — only resolve the ones that \
+are unambiguous.
 
 You must NOT, even a little:
 - Replace any word with a synonym or a "better" word choice.
-- Rephrase, reword, shorten, condense, or restructure any sentence.
+- Rephrase, reword, shorten, condense, or restructure any sentence, except reusing its own subject/structure \
+to resolve an unambiguous self-correction exactly as rule 3 describes.
 - Merge, split, or reorder sentences beyond ordinary punctuation.
-- Drop any substantive word or phrase that isn't a filler/disfluency — casual or repetitive-sounding \
-phrasing ("and stuff", "it's just some cool stuff", etc.) is the speaker's real content and stays.
+- Drop any substantive word or phrase that isn't a filler/disfluency or the superseded half of an \
+unambiguous self-correction (rule 3) — casual or repetitive-sounding phrasing ("and stuff", "it's just \
+some cool stuff", etc.) is the speaker's real content and stays.
 - Add anything the speaker didn't say.
 If in doubt, leave the wording exactly as spoken — preserving the speaker's own phrasing, even when \
 informal or repetitive, matters more than making it sound polished.
@@ -219,6 +252,29 @@ but i am going to be going to the beach later today it's just some cool stuff</t
 Example 2 output: Hey, my name is Brogan. I'm really excited to be talking right now and working on \
 this app, and I'm currently reading the book Jurassic Park. It's a pretty cool book and stuff, but I am \
 going to be going to the beach later today. It's just some cool stuff.
+
+Example 3 input: <transcript>i want to go to the store at 6 no wait i want to go to the store at 7</transcript>
+Example 3 output: I want to go to the store at 7.
+
+Example 4 input: <transcript>my favorite food is chicken oh wait no it's actually french fries</transcript>
+Example 4 output: My favorite food is french fries.
+
+Example 5 input: <transcript>so the trigger word i want to use is no wait can you set that up for me</transcript>
+Example 5 output: So the trigger word I want to use is "no wait," can you set that up for me?
+(Not a correction here — "no wait" is the actual word being dictated, not the speaker changing their mind, \
+so it stays exactly as said.)
+
+Example 6 input: <transcript>when i go to the store i wanted chicken oh no i meant salad</transcript>
+Example 6 output: When I go to the store, I wanted salad.
+(Reuse "wanted," the original sentence's own verb, for the corrected item — not "I meant salad," which is \
+just repeating the correction's own filler wording instead of finishing the original sentence.)
+
+Example 7 input: <transcript>can you get me some wipes or i mean diapers from the store</transcript>
+Example 7 output: Can you get me some diapers from the store?
+
+Example 8 input: <transcript>let's get some chicken and rice or i mean beans</transcript>
+Example 8 output: Let's get some chicken and beans.
+(The correction only replaces "rice," the item right next to it — "chicken" was never in question and stays.)
 
 Known proper nouns / terms — use ONLY if they actually appear in the transcript; never introduce a \
 term from this list that the speaker didn't say: {dictionary}"""
@@ -245,20 +301,61 @@ def load_dictionary() -> str:
     return ""
 
 
-def load_hotkey_choice() -> str:
-    """"right" or "left" -- which physical Option key starts dictation.
-    Windows ignores this; only Mac offers a choice today. Defaults to
-    "right", Wingvox's original hotkey, so a machine with no hotkey.txt at
-    all (every install before this feature existed) behaves exactly as it
-    always has."""
-    if not pc.IS_MAC or not HOTKEY_PATH.exists():
-        return "right"
-    choice = HOTKEY_PATH.read_text(encoding="utf-8").strip().lower()
-    return "left" if choice == "left" else "right"
+def _default_hotkey_key():
+    """Wingvox's known-good default: Right Option on Mac, Right Alt on
+    Windows -- unchanged from before the picker existed."""
+    return pc.mac_hotkey_keys("right")[0] if pc.IS_MAC else keyboard.Key.alt_r
 
 
-def save_hotkey_choice(choice: str) -> None:
-    HOTKEY_PATH.write_text(f"{choice}\n", encoding="utf-8")
+def _hotkey_key_to_token(key) -> str:
+    """Serializes a pynput Key enum member or KeyCode into one line of
+    hotkey.txt. Two forms: "key:<name>" for an enum member (alt_r, ctrl_r,
+    ...), "code:vk=<n>,char=<c>" for an arbitrary KeyCode (a plain letter/
+    digit/symbol the picker captured) -- vk drives matching, char is kept
+    alongside purely so the file stays human-debuggable."""
+    if isinstance(key, keyboard.Key):
+        return f"key:{key.name}"
+    vk = key.vk if key.vk is not None else ""
+    char = key.char or ""
+    return f"code:vk={vk},char={char}"
+
+
+def token_to_hotkey_key(token: str):
+    """Inverse of _hotkey_key_to_token, plus backward compatibility with the
+    original Mac-only "left"/"right" format. Returns None for anything that
+    doesn't parse -- callers treat that as "corrupted, use the default"."""
+    token = token.strip()
+    if token in ("left", "right"):
+        return pc.mac_hotkey_keys(token)[0]
+    if token.startswith("key:"):
+        return getattr(keyboard.Key, token[4:], None)
+    if token.startswith("code:"):
+        parts = dict(p.split("=", 1) for p in token[5:].split(",") if "=" in p)
+        vk = int(parts["vk"]) if parts.get("vk") else None
+        char = parts.get("char") or None
+        return keyboard.KeyCode(vk=vk, char=char) if (vk is not None or char) else None
+    return None
+
+
+def load_hotkey(grandfathered: bool):
+    """The configured dictation hotkey as a pynput Key/KeyCode, or None to
+    signal "no hotkey.txt yet -- show the picker".
+
+    grandfathered distinguishes a genuine first run (show the picker) from
+    an upgrade of an existing install that predates the picker (silently
+    keep behaving exactly as it always has) -- both have no hotkey.txt.
+    Pass notice.AGREED_PATH.exists(), captured *before* calling
+    notice.check() (which creates that file the moment a first-timer
+    agrees) -- an existing install already has it; a genuine first run
+    doesn't yet."""
+    if not HOTKEY_PATH.exists():
+        return _default_hotkey_key() if grandfathered else None
+    key = token_to_hotkey_key(HOTKEY_PATH.read_text(encoding="utf-8"))
+    return key if key is not None else _default_hotkey_key()
+
+
+def save_hotkey(key) -> None:
+    HOTKEY_PATH.write_text(_hotkey_key_to_token(key) + "\n", encoding="utf-8")
 
 
 def load_language_choice() -> str:
@@ -403,99 +500,145 @@ def _resample(audio: np.ndarray, orig_rate: int, target_rate: int) -> np.ndarray
 
 
 class Recorder:
+    """Keeps one input stream open for as long as Wingvox runs, rather than
+    opening a fresh sd.InputStream per recording and closing it again on
+    every stop(). Opening a stream carries real, measured startup latency
+    (WASAPI shared-mode negotiation on Windows commonly costs 100-300ms) --
+    against MIN_AUDIO_SECONDS/TAP_MAX_SECONDS (0.3s/0.35s), that was enough
+    to eat a fast, deliberate tap down to almost no captured audio at all,
+    surfacing as "0.0s captured" -> "Too short" for exactly the quick-tap
+    gesture TAP_MAX_SECONDS exists to support. start()/stop() now only
+    toggle whether the callback is appending frames; the underlying stream
+    stays running in between, so the next tap starts collecting immediately
+    instead of waiting on the device to spin back up."""
+
     def __init__(self, on_level=None):
         self._frames = []
         self._stream = None
         self._native_rate = SAMPLE_RATE
         self._lock = threading.Lock()
         self._on_level = on_level
+        self._collecting = False
+        # Set by the stream's finished_callback if PortAudio ever tears it
+        # down on its own (device unplugged, driver reset) -- next start()
+        # then knows to reopen instead of silently collecting from a dead
+        # stream forever.
+        self._stream_broken = False
+
+    def _open_stream(self):
+        """Opens self._stream (candidate-fallback logic, unchanged from the
+        original per-recording open). Caller holds self._lock."""
+        preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
+
+        def _callback(indata, *_):
+            if not self._collecting:
+                return
+            # No duration cap -- a hands-free (tap-to-lock) dictation is
+            # meant to be able to run as long as someone wants to talk.
+            self._frames.append(indata.copy())
+            if self._on_level:
+                self._on_level(float(np.sqrt(np.mean(indata**2))))
+
+        def _finished(*_):
+            self._stream_broken = True
+
+        def _open(device, rate):
+            dev_index = device if device is not None else sd.default.device[0]
+            is_wasapi = (
+                _WASAPI_HOSTAPI_INDEX is not None
+                and sd.query_devices(dev_index)["hostapi"] == _WASAPI_HOSTAPI_INDEX
+            )
+            stream = sd.InputStream(
+                device=device,
+                samplerate=rate, channels=1, dtype="float32",
+                callback=_callback, finished_callback=_finished,
+                extra_settings=_WASAPI_SETTINGS if is_wasapi else None,
+            )
+            stream.start()
+            return stream
+
+        # A virtual/VM audio device can fail in several different, even
+        # inconsistent-across-runs ways (invalid sample rate, a format
+        # WASAPI's shared-mode engine rejects, a WDM-KS driver ioctl
+        # error) -- rather than betting everything on the one
+        # "preferred" device, fall through every other available input
+        # device (each tried at 16kHz, then its own native rate) until
+        # one actually opens.
+        candidates = [preferred]
+        if pc.IS_WINDOWS:
+            try:
+                candidates += [
+                    i for i, d in enumerate(sd.query_devices())
+                    if d["max_input_channels"] > 0 and i != preferred
+                ]
+            except Exception:
+                pass
+
+        last_error = None
+        for device in candidates:
+            try:
+                self._native_rate = SAMPLE_RATE
+                self._stream = _open(device, SAMPLE_RATE)
+                self._stream_broken = False
+                return
+            except sd.PortAudioError as e:
+                last_error = e
+            try:
+                info = sd.query_devices(
+                    device if device is not None else sd.default.device[0], "input"
+                )
+                self._native_rate = int(info["default_samplerate"])
+                self._stream = _open(device, self._native_rate)
+                self._stream_broken = False
+                return
+            except Exception as e:
+                last_error = e
+        self._stream = None
+        raise last_error
+
+    def ensure_open(self):
+        """Pre-opens the input stream ahead of the first recording, so even
+        the very first tap after Wingvox starts is instant rather than
+        paying stream-startup cost on that first press. Safe to call more
+        than once; a no-op once a healthy stream is already open. Call
+        during warm-up, not from start() -- start() still needs its own
+        open-if-needed check as a fallback in case this was never called or
+        the stream died in between recordings."""
+        with self._lock:
+            if self._stream is not None and not self._stream_broken:
+                return
+            self._open_stream()
 
     def start(self):
         with self._lock:
+            if self._stream is None or self._stream_broken:
+                # Closing a broken stream before replacing it: best-effort,
+                # matching stop()'s reasoning below -- a dead stream's mic
+                # handle should be released before opening a new one, but a
+                # failure here must not stop the reopen attempt.
+                if self._stream is not None:
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
+                self._open_stream()
             self._frames = []
-            self._native_rate = SAMPLE_RATE
-            preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
-
-            def _callback(indata, *_):
-                # No duration cap -- a hands-free (tap-to-lock) dictation is
-                # meant to be able to run as long as someone wants to talk.
-                self._frames.append(indata.copy())
-                if self._on_level:
-                    self._on_level(float(np.sqrt(np.mean(indata**2))))
-
-            def _open(device, rate):
-                dev_index = device if device is not None else sd.default.device[0]
-                is_wasapi = (
-                    _WASAPI_HOSTAPI_INDEX is not None
-                    and sd.query_devices(dev_index)["hostapi"] == _WASAPI_HOSTAPI_INDEX
-                )
-                stream = sd.InputStream(
-                    device=device,
-                    samplerate=rate, channels=1, dtype="float32",
-                    callback=_callback,
-                    extra_settings=_WASAPI_SETTINGS if is_wasapi else None,
-                )
-                stream.start()
-                return stream
-
-            # A virtual/VM audio device can fail in several different, even
-            # inconsistent-across-runs ways (invalid sample rate, a format
-            # WASAPI's shared-mode engine rejects, a WDM-KS driver ioctl
-            # error) -- rather than betting everything on the one
-            # "preferred" device, fall through every other available input
-            # device (each tried at 16kHz, then its own native rate) until
-            # one actually opens.
-            candidates = [preferred]
-            if pc.IS_WINDOWS:
-                try:
-                    candidates += [
-                        i for i, d in enumerate(sd.query_devices())
-                        if d["max_input_channels"] > 0 and i != preferred
-                    ]
-                except Exception:
-                    pass
-
-            last_error = None
-            for device in candidates:
-                try:
-                    self._native_rate = SAMPLE_RATE
-                    self._stream = _open(device, SAMPLE_RATE)
-                    return
-                except sd.PortAudioError as e:
-                    last_error = e
-                try:
-                    info = sd.query_devices(
-                        device if device is not None else sd.default.device[0], "input"
-                    )
-                    self._native_rate = int(info["default_samplerate"])
-                    self._stream = _open(device, self._native_rate)
-                    return
-                except Exception as e:
-                    last_error = e
-            self._stream = None
-            raise last_error
+            self._collecting = True
 
     def stop(self) -> np.ndarray:
         with self._lock:
-            if self._stream is None:
-                return np.zeros(0, dtype=np.float32)
-            # Clear self._stream before attempting to actually stop/close it,
-            # not after -- on a flaky driver (this session directly hit
-            # WDM-KS ioctl errors) stream.stop()/close() can raise, and if
-            # self._stream were only cleared on the success path, the next
-            # start() would silently overwrite the reference to this broken
-            # stream without ever closing it: an orphaned stream with its mic
-            # handle never released, which can make the next recording fail
-            # to acquire the microphone at all. Best-effort cleanup instead.
-            stream, self._stream = self._stream, None
-            try:
-                stream.stop()
-            except Exception:
-                pass
-            try:
-                stream.close()
-            except Exception:
-                pass
+            self._collecting = False
+            if self._stream_broken:
+                # Best-effort cleanup of a stream PortAudio already tore
+                # down on its own -- the next start() reopens either way,
+                # this just releases the dead handle promptly rather than
+                # waiting for garbage collection.
+                if self._stream is not None:
+                    try:
+                        self._stream.close()
+                    except Exception:
+                        pass
+                    self._stream = None
             if not self._frames:
                 return np.zeros(0, dtype=np.float32)
             audio = np.concatenate(self._frames)[:, 0]
@@ -521,7 +664,7 @@ def apply_corrections(text: str, corrections: list) -> str:
 
 
 def transcribe(audio: np.ndarray, dictionary: str, corrections: list = (), language: str = "en") -> str:
-    if len(audio) < SAMPLE_RATE * 0.3:  # <0.3s: ignore accidental taps
+    if len(audio) < SAMPLE_RATE * MIN_AUDIO_SECONDS:  # ignore accidental taps
         return ""
     if float(np.sqrt(np.mean(audio**2))) < 0.001:  # silence: whisper would hallucinate
         return ""
@@ -609,10 +752,17 @@ def _looks_like_prompt_echo(text: str, prompt: str) -> bool:
 # reword) must not look like a pronoun swap just because "im" isn't itself
 # in _CRITICAL_WORDS. _CONTRACTION_CRITICAL maps each contracted token to
 # the critical word(s) it implies, so both spellings normalize the same way.
+#
+# Bare "no" deliberately isn't in this set, unlike "not"/"never" -- it's the
+# single most common self-correction signal ("no wait", "oh wait no"), and
+# CLEANUP_SYSTEM_PROMPT's rule 3 is explicitly allowed to drop it as part of
+# resolving one. A sentence-internal negation getting silently flipped (the
+# actual bug this set exists to catch) shows up as "not"/a "dont"-style
+# contraction disappearing instead, which is still fully covered below.
 _CRITICAL_WORDS = frozenset([
     "i", "me", "my", "mine", "you", "your", "yours", "we", "us", "our", "ours",
     "they", "them", "their", "theirs", "he", "him", "his", "she", "her", "hers",
-    "it", "its", "not", "no", "never",
+    "it", "its", "not", "never",
 ])
 _CONTRACTION_CRITICAL = {
     "im": "i", "ive": "i", "id": "i",
@@ -632,11 +782,62 @@ _CONTRACTION_CRITICAL = {
 def _critical_set(words) -> set:
     result = set()
     for w in words:
+        # _CONTRACTION_CRITICAL's keys are apostrophe-free (Whisper's own
+        # spelling of a contraction), but the cleanup model adds proper
+        # apostrophes back when it fixes mechanics -- "dont" -> "don't" --
+        # so without stripping them here, its own correctly-punctuated
+        # output stopped matching its raw negation and got rejected as a
+        # mismatch, silently failing every ordinary sentence that hit it.
+        w = w.replace("'", "")
         if w in _CRITICAL_WORDS:
             result.add(w)
         elif w in _CONTRACTION_CRITICAL:
             result.add(_CONTRACTION_CRITICAL[w])
     return result
+
+
+# Common self-correction signals -- see CLEANUP_SYSTEM_PROMPT rule 3. Only
+# used by _looks_like_runaway to decide how much word loss to tolerate and
+# where to draw the line between the superseded and surviving parts of a
+# resolved correction, not to decide what counts as a correction (that's the
+# model's semantic judgment call, on purpose -- a fixed phrase list would
+# trip on the same trap case rule 3's own prompt warns about, someone
+# dictating one of these phrases as real content).
+_CORRECTION_SIGNAL_WORDS = frozenset([
+    "wait", "actually", "correction", "correct", "scratch", "mean", "meant",
+    "sorry", "oops", "instead", "rather", "mind",
+])
+
+
+def _critical_mismatch(raw_words, cleaned_words) -> bool:
+    """Whether a pronoun or negation changed in a way that risks meaning --
+    _CRITICAL_WORDS above.
+
+    A critical word in cleaned that isn't anywhere in the raw transcript at
+    all is always flagged, correction or not -- that's a swap or
+    hallucination, never a legitimate edit.
+
+    With no correction signal present, every critical word in the raw
+    transcript must still be in cleaned too (the original, strict check --
+    this is the common case, ordinary dictation with no correction
+    happening, and it stays exactly as protective as before).
+
+    With a signal present, resolving the correction can legitimately rework
+    which of the raw transcript's own critical words end up where -- "my
+    favorite food is chicken, oh wait, it's actually french fries" has to
+    become "My favorite food is french fries," reusing "my" from the
+    superseded clause while dropping "it's" from the correction itself, a
+    reassignment a fixed split point can't validate. Requiring every
+    cleaned critical word to have come from the raw transcript SOMEWHERE
+    (not hallucinated) is what's still enforced; exactly where it moved to
+    isn't."""
+    raw_critical = _critical_set(raw_words)
+    cleaned_critical = _critical_set(cleaned_words)
+    if cleaned_critical - raw_critical:
+        return True
+    if not (set(raw_words) & _CORRECTION_SIGNAL_WORDS):
+        return raw_critical != cleaned_critical
+    return False
 
 
 def _looks_like_runaway(raw: str, cleaned: str) -> bool:
@@ -645,9 +846,12 @@ def _looks_like_runaway(raw: str, cleaned: str) -> bool:
     terms the speaker never said). A real cleanup keeps most of the
     speaker's own words and doesn't balloon in length, so anything that
     drifts too far from the raw transcript is treated as a runaway
-    generation rather than a genuine edit. Also rejects a swapped/dropped
-    pronoun or negation even when overlap and length both look fine (see
-    _CRITICAL_WORDS above) -- those are meaning-altering, not stylistic."""
+    generation rather than a genuine edit -- except a resolved self-
+    correction, which legitimately drops a large chunk of the raw transcript
+    (the superseded clause) and needs a much more forgiving floor. Also
+    rejects a swapped/dropped pronoun or negation even when overlap and
+    length both look fine (see _critical_mismatch above) -- those are
+    meaning-altering, not stylistic."""
     raw_words = _words(raw)
     cleaned_words = _words(cleaned)
     raw_set = set(raw_words)
@@ -658,8 +862,9 @@ def _looks_like_runaway(raw: str, cleaned: str) -> bool:
     overlap = shared / len(raw_set)
     reverse_overlap = shared / len(cleaned_set)
     too_long = len(cleaned_words) > max(20, len(raw_set) * 2.5)
-    critical_mismatch = _critical_set(raw_words) != _critical_set(cleaned_words)
-    return overlap < 0.4 or reverse_overlap < 0.4 or too_long or critical_mismatch
+    overlap_floor = 0.15 if raw_set & _CORRECTION_SIGNAL_WORDS else 0.4
+    return (overlap < overlap_floor or reverse_overlap < 0.4 or too_long
+            or _critical_mismatch(raw_words, cleaned_words))
 
 
 # How long after an unfinished dictation a new one is still assumed to be
@@ -959,21 +1164,10 @@ def run():
     print(f"  Wingvox {WINGVOX_VERSION} starting ({platform.system()})")
     dictionary = load_dictionary()
     corrections = load_corrections()
-    hotkey_choice = load_hotkey_choice()
     language_choice = load_language_choice()
     if language_choice != "en":
         lang_name = KNOWN_LANGUAGES.get(language_choice, language_choice)
         print(f"  Language set to {lang_name} ({language_choice})")
-    if pc.IS_MAC:
-        HOTKEY_KEYS = pc.mac_hotkey_keys(hotkey_choice)
-        HOTKEY_LABEL = pc.MAC_HOTKEY_LABELS[hotkey_choice]
-        if hotkey_choice == "left":
-            print("  ⚠ Left Option is the dictation hotkey — Option+drag, Option+click "
-                  "and Option+Space (dictionary lookup) will start a recording instead "
-                  "while Wingvox is running.")
-    else:
-        HOTKEY_KEYS = pc.HOTKEY_KEYS
-        HOTKEY_LABEL = "Right Alt"
     print("  Requesting microphone access…")
     if not ensure_microphone_access():
         if pc.IS_MAC:
@@ -1000,21 +1194,38 @@ def run():
     def status(text, color="white", hide_after=None, on_click=None):
         print(f"  {text}")
         if overlay:
-            # overlay_windows.StatusOverlay.show() has no on_click param --
-            # forwarding it unconditionally would raise TypeError there the
-            # first time an update is found on Windows.
-            if pc.IS_MAC:
-                overlay.show(text, color, hide_after=hide_after, on_click=on_click)
-            else:
-                overlay.show(text, color, hide_after=hide_after)
+            overlay.show(text, color, hide_after=hide_after, on_click=on_click)
 
     mac_permission_flow(status)
+
+    # Captured before notice.check() -- that call creates AGREED_PATH the
+    # moment a first-timer agrees, so checking afterward would always read
+    # True and this install could never be told apart from a genuine first
+    # run (see load_hotkey()'s grandfathered param).
+    notice_already_agreed = notice.AGREED_PATH.exists()
 
     # Before the hotkey listener exists, so "must acknowledge before use" is
     # enforced by there being nothing to press yet rather than by a flag some
     # other code path could forget to check.
     if not notice.check(status):
         sys.exit(0)
+
+    hotkey_key = load_hotkey(grandfathered=notice_already_agreed)
+    if hotkey_key is None:
+        # Genuinely no hotkey.txt on a fresh install (not an upgrade) --
+        # ask them to tap the key they want, rather than silently defaulting
+        # and leaving them to discover Right Alt/Right Option by accident.
+        hotkey_key = hotkey_picker.run(status)
+        save_hotkey(hotkey_key)
+    HOTKEY_KEYS = pc.hotkey_keys_for(hotkey_key)
+    if pc.IS_MAC and hotkey_key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
+        HOTKEY_LABEL = pc.MAC_HOTKEY_LABELS["left" if hotkey_key == keyboard.Key.alt_l else "right"]
+    else:
+        HOTKEY_LABEL = pc.key_label(hotkey_key)
+    if pc.IS_MAC and hotkey_key == keyboard.Key.alt_l:
+        print("  ⚠ Left Option is the dictation hotkey — Option+drag, Option+click "
+              "and Option+Space (dictionary lookup) will start a recording instead "
+              "while Wingvox is running.")
 
     recorder = Recorder(on_level=(overlay.push_level if overlay else None))
     state = {
@@ -1075,7 +1286,7 @@ def run():
                 # exists to catch doesn't apply here at all. Only a press
                 # (handled in on_press) ends a locked recording.
                 continue
-            if pc.is_hotkey_physically_down(hotkey_choice):
+            if pc.is_hotkey_physically_down(hotkey_key):
                 seen_down = True
             elif seen_down:
                 print("  [key] watchdog: physical key up, on_release never fired -- finishing recording")
@@ -1094,6 +1305,17 @@ def run():
         # simply be stopped. Either way the user shouldn't need to know
         # Ollama exists.
         launched = not ollama_available() and pc.start_ollama_background()
+
+        # Opens the mic stream now rather than leaving it to the first
+        # press -- see Recorder's docstring for why a cold stream open on
+        # every recording was the actual cause of taps getting cut down to
+        # "0.0s captured". A failure here isn't fatal: start() still opens
+        # (or reopens) the stream itself on the first real press, this is
+        # purely so that first press doesn't pay the cost start() would.
+        try:
+            recorder.ensure_open()
+        except Exception as e:
+            print(f"  ⚠ Couldn't pre-open the microphone ({e}) -- will retry on first press")
 
         status("Loading speech model…", "gray")
         try:
@@ -1135,6 +1357,17 @@ def run():
 
     def process(audio: np.ndarray):
         t0 = time.time()
+        if len(audio) < SAMPLE_RATE * MIN_AUDIO_SECONDS:
+            # A tap released before any real speech could be captured --
+            # distinct from transcribe()'s own identical length check below,
+            # which folds this same case into an indistinguishable "" right
+            # alongside genuine silence. Caught here, before transcribe()
+            # even runs, so the message can point at the actual mistake
+            # (release timing) instead of sending someone to check
+            # microphone permissions that were never the problem.
+            status("Too short — hold the key while you speak, then release",
+                   "gray", hide_after=4)
+            return
         status("Transcribing…")
         try:
             raw = transcribe(audio, dictionary, corrections, language_choice)
@@ -1289,8 +1522,9 @@ def run():
         # returning False as "stop listening entirely" (raises
         # StopException), not "suppress this one event". It silently killed
         # the whole global hotkey after the very first press on every
-        # Windows run. Real selective suppression is wired up below via
-        # win32_event_filter/suppress_event on the Listener itself.
+        # Windows run. Suppression is handled a different way now -- see
+        # pc.make_alt_suppressing_event_filter, wired in where the Listener
+        # is constructed below -- which is why nothing needs to happen here.
 
     def on_release(key):
         if key in CONTROL_KEYS:
@@ -1367,18 +1601,6 @@ def run():
                 status(f"⚠ {name} error: {e}", "orange", hide_after=6)
         return wrapper
 
-    # NOTE: previously tried suppressing the Alt ribbon-hint overlay here via
-    # win32_event_filter + listener.suppress_event(). Turns out
-    # suppress_event() works by *raising an exception*
-    # (SystemHook.SuppressException) that unwinds pynput's event processing
-    # for that message right there -- it doesn't just block OS-level
-    # propagation, it also aborts before on_press/on_release are ever
-    # called. That made suppressing the Alt key indistinguishable from the
-    # hotkey not working at all. The ribbon-hint flicker is cosmetic;
-    # dropped rather than risk breaking the hotkey again. If it's worth
-    # fixing later, it needs the recording start/stop logic run from
-    # *inside* the filter itself (before raising suppress_event), not a
-    # separate on_press/on_release pair.
     warm_done = threading.Event()
 
     def _warm_up_then_signal():
@@ -1390,9 +1612,11 @@ def run():
             warm_done.set()
 
     def _do_update():
-        # Runs on a background thread -- update.sh itself can block on a
-        # slow git fetch/pull, and must never hold up the Cocoa main thread
-        # that _handle_update_click was called from.
+        # Runs on a background thread -- pc.run_update() can block on a slow
+        # git fetch/pull (Mac) or just take a moment to check dirty/behind
+        # status before handing off (Windows), and must never hold up the
+        # UI thread that _handle_update_click was called from (AppKit on
+        # Mac, Tkinter on Windows).
         result = pc.run_update()
         if result == "dirty":
             status("⚠ Update available, but the Wingvox folder has uncommitted "
@@ -1406,20 +1630,22 @@ def run():
             # machine between the check and the click.
             status("✓ Already up to date", "green", hide_after=3)
         elif result == "updated":
-            # update.sh's own `launchctl kickstart -k` is already tearing
-            # this process down to relaunch it at the new commit -- nothing
-            # further to do here (same as the existing permission-grant
-            # restart in mac_permission_flow).
+            # Mac: update.sh's own `launchctl kickstart -k` is already
+            # tearing this process down to relaunch it at the new commit.
+            # Windows: update.ps1 was just launched, detached, to pull and
+            # rebuild -- it will stop and restart this same process partway
+            # through. Either way nothing further to do here (same as the
+            # existing permission-grant restart in mac_permission_flow).
             pass
         else:
             reason = result.split(":", 1)[1] if ":" in result else result
             status(f"⚠ Update failed ({reason})", "orange", hide_after=12)
 
     def _handle_update_click():
-        # Called on the main thread (AppKit delivers the click there). Must
-        # not block on network/git -- flip the pill to a non-interactive
-        # "working" state immediately, then hand the real work to a
-        # background thread.
+        # Called on the UI thread (AppKit's event monitor on Mac, a Tkinter
+        # canvas click binding on Windows). Must not block on network/git --
+        # flip the pill to a non-interactive "working" state immediately,
+        # then hand the real work to a background thread.
         status("Updating…", "gray")
         threading.Thread(target=_do_update, daemon=True, name="wingvox-update").start()
 
@@ -1442,7 +1668,9 @@ def run():
         # keeps working for as long as this run of Wingvox is behind, not
         # just in the few seconds after the one automatic check. Runs on its
         # own thread (called from on_press, which must never block on git).
-        behind = pc.check_for_update()
+        # Platform-aware -- see check_for_relevant_update()'s docstring --
+        # so a Windows-only fix doesn't page a Mac user, and vice versa.
+        behind = pc.check_for_relevant_update()
         if behind:
             _show_update_pill()
         elif behind is False:
@@ -1455,18 +1683,14 @@ def run():
         # its pill doesn't stomp on "Ready", it never blocks startup, and a
         # failure (offline, no git, someone's own fork) is a log line rather
         # than anything the user sees. Wingvox never pulls an update on its
-        # own -- only in direct response to the user clicking the pill (Mac)
-        # or running update.sh themselves (Windows, no click-to-update yet).
+        # own -- only in direct response to the user clicking the pill.
         warm_done.wait(180)
         time.sleep(5)  # let the "Ready" pill finish its own hide_after
-        behind = pc.check_for_update()
+        # Platform-aware -- see check_for_relevant_update()'s docstring.
+        behind = pc.check_for_relevant_update()
         if behind:
             print(f"  Update available — run: {pc.update_command()}")
-            if pc.IS_MAC:
-                _show_update_pill()
-            else:
-                status("Update available — run ./update.sh in the Wingvox folder",
-                       "orange", hide_after=12)
+            _show_update_pill()
         elif behind is False:
             print("  Up to date.")
         else:
@@ -1474,10 +1698,31 @@ def run():
 
     threading.Thread(target=_warm_up_then_signal, daemon=True).start()
     threading.Thread(target=_update_check, daemon=True).start()
-    listener = keyboard.Listener(
-        on_press=_guarded("on_press", on_press),
-        on_release=_guarded("on_release", on_release),
-    )
+
+    guarded_on_press = _guarded("on_press", on_press)
+    guarded_on_release = _guarded("on_release", on_release)
+    listener_kwargs = dict(on_press=guarded_on_press, on_release=guarded_on_release)
+
+    hotkey_vk = pc.key_vk(hotkey_key) if pc.IS_WINDOWS else None
+    if pc.IS_WINDOWS and hotkey_vk is not None and pc.is_alt_family_vk(hotkey_vk):
+        # A bare Alt-family hotkey (Left or Right Alt) trips Windows' native
+        # menu-access-mode reflex on tap+release -- the same thing that
+        # highlights Notepad's File menu when you tap Alt alone -- which
+        # silently swallows the Ctrl+V paste that lands seconds later while
+        # the focused window is still in that state. Confirmed via live
+        # repro (SendInput + GetGUIThreadInfo's GUI_INMENUMODE flag +
+        # WM_GETTEXT, not clipboard round-tripping, which gives false
+        # positives) against real Notepad. See
+        # pc.make_alt_suppressing_event_filter's docstring for why this has
+        # to run the state machine from inside the filter itself instead of
+        # a separate on_press/on_release pair -- an earlier attempt at
+        # exactly that silently killed the whole hotkey instead of just
+        # suppressing the ribbon-hint flicker it was going after.
+        listener_kwargs["win32_event_filter"] = pc.make_alt_suppressing_event_filter(
+            hotkey_vk, guarded_on_press, guarded_on_release, lambda: listener
+        )
+
+    listener = keyboard.Listener(**listener_kwargs)
     listener.start()
 
     def _watch_listener():
@@ -1538,9 +1783,10 @@ def cmd_set_language(code: str):
     save_language_choice(code)
     name = KNOWN_LANGUAGES.get(code, code)
     print(f"Language set to {name} ({code}). Takes effect on next restart.")
-    if not pc.IS_MAC:
-        print("Windows note: the default speech model (small.en) is English-only.")
-        print("Set WINGVOX_WHISPER_MODEL=small (drop the .en) for this to actually take effect.")
+    if not pc.IS_MAC and code != "en":
+        print("Windows note: this switches the speech model to a multilingual one")
+        print("(from the English-only default) -- if it isn't already cached, the next")
+        print("restart downloads it, so the first dictation after that will be slow.")
     if code not in KNOWN_LANGUAGES:
         print(f"Note: {code!r} isn't in Wingvox's short list of known codes -- if this")
         print("isn't a real Whisper/ISO 639-1 language code, transcription will be wrong.")
@@ -1584,23 +1830,28 @@ def cmd_add_correction(wrong: str, right: str):
     print(f"Added: {wrong!r} -> {right!r}. Takes effect on next restart.")
 
 
-def cmd_set_hotkey(choice: str):
-    if not pc.IS_MAC:
-        print("The hotkey isn't user-selectable on Windows yet -- always Right Alt.")
-        return
-    choice = choice.strip().lower()
-    if choice not in ("right", "left"):
-        print('Usage: flow.py set-hotkey right|left')
-        print(f"Currently: {pc.MAC_HOTKEY_LABELS[load_hotkey_choice()]}")
-        return
-    save_hotkey_choice(choice)
-    print(f"Hotkey set to {pc.MAC_HOTKEY_LABELS[choice]}. Takes effect on next restart:")
-    print(f"  launchctl kickstart -k gui/$(id -u)/com.broganwilliams.wingvox")
-    if choice == "left":
+def cmd_set_hotkey():
+    print("Tap the key you'd like to use to start dictation…")
+    key = hotkey_picker.run()
+    save_hotkey(key)
+    label = (pc.MAC_HOTKEY_LABELS["left" if key == keyboard.Key.alt_l else "right"]
+              if pc.IS_MAC and key in (keyboard.Key.alt_l, keyboard.Key.alt_r)
+              else pc.key_label(key))
+    print(f"Hotkey set to {label}. Takes effect on next restart:")
+    if pc.IS_MAC:
+        print("  launchctl kickstart -k gui/$(id -u)/com.broganwilliams.wingvox")
+    else:
+        print("  Run wingvox-off.cmd, then wingvox-on.cmd")
+    if key == keyboard.Key.alt_l:
         print()
-        print("Note: Left Option prefixes several system shortcuts (Option+drag,")
-        print("Option+click, Option+Space for the dictionary lookup). Those will")
-        print("start a recording instead while Wingvox is running.")
+        print("Note: Left Option/Alt prefixes several system shortcuts (Option+drag,")
+        print("Option+click, Option+Space for the dictionary lookup on Mac; Alt+Tab,")
+        print("Alt+F4 on Windows). Those will start a recording instead while Wingvox")
+        print("is running.")
+    elif not isinstance(key, keyboard.Key) and key.char:
+        print()
+        print(f"Note: {key.char!r} is also used for normal typing -- every press of it")
+        print("anywhere will start a recording while Wingvox is running.")
 
 
 if __name__ == "__main__":
@@ -1616,7 +1867,7 @@ if __name__ == "__main__":
     elif args[0] == "check-update":
         cmd_check_update()
     elif args[0] == "set-hotkey":
-        cmd_set_hotkey(args[1] if len(args) > 1 else "")
+        cmd_set_hotkey()
     elif args[0] == "set-language":
         cmd_set_language(args[1] if len(args) > 1 else "")
     elif args[0] == "add-correction":

@@ -2,3 +2,4 @@ n8n
 Wispr Flow
 Ollama
 Wingvox
+pill

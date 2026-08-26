@@ -3,14 +3,27 @@ overlay_mac.py -- StatusOverlay.show()/show_recording()/push_level()/hide(),
 plus a module-level run_event_loop() -- so flow.py can dispatch between the
 two without any other code changes.
 
-Two visual regressions vs. the Mac version, both fundamental Tkinter/Win32
-limits rather than bugs to chase: stock Tkinter's only transparency
-mechanism on Windows is a colorkey ("-transparentcolor"), not a real alpha
-channel, so the dark translucent capsule the Mac version draws renders here
-as a fully opaque capsule; and Canvas has no native corner-radius primitive,
-so rounded corners are hand-drawn and slightly less crisp than AppKit's
-CALayer.cornerRadius. Click-through, unlike those two, is NOT approximated --
-it's a real Win32 extended window style (WS_EX_TRANSPARENT).
+Each frame is rendered as an anti-aliased RGBA bitmap via Pillow --
+supersampled at SCALE x, then downsampled with a LANCZOS filter, since
+neither Tkinter's Canvas primitives nor GDI antialias anything on their
+own -- and displayed through a real per-pixel-alpha layered window
+(UpdateLayeredWindow) instead of Tkinter's colorkey trick
+("-transparentcolor"). Colorkey transparency is strictly binary (a pixel
+is either fully invisible or fully opaque), which is why an earlier version
+of this file rendered the pill as a flat opaque capsule with hard, jagged
+edges instead of Mac's soft translucent one -- a real per-pixel alpha
+channel is the only way to blend smoothly against whatever's actually
+behind the window on the desktop, the same as AppKit/Quartz does for
+overlay_mac.py automatically.
+
+The Tk root window still owns position (root.geometry(), same _rect_for()
+math as before) and click-through toggling (WS_EX_TRANSPARENT). It no
+longer owns visible rendering, though -- once UpdateLayeredWindow has been
+called on a window, Windows stops delivering WM_PAINT for it and relies
+entirely on the bitmap supplied there, so a Canvas child's own drawing
+would never actually be shown. Mouse input delivery is unaffected by that,
+so button clicks are hit-tested directly against stored screen rects from
+a plain <Button-1> binding on the root instead.
 
 Tkinter is not thread-safe -- every widget touch must happen on the thread
 that called mainloop(). The pipeline runs on background threads, so all of
@@ -20,94 +33,441 @@ self-rescheduling root.after() poll on the main thread.
 """
 
 import ctypes
+import ctypes.wintypes as wintypes
 import math
 import queue
 import threading
 import tkinter as tk
 
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
 PANEL_W, PANEL_H = 460, 40
 WAVE_PANEL_W, WAVE_PANEL_H = 60, 26
 WAVE_MARGIN = 3
 
+# Supersampling factor: each frame is drawn at (W*SCALE, H*SCALE) and
+# downsampled with LANCZOS resampling, which is what actually produces the
+# antialiased edges/text/lines -- draw-then-shrink, not any special flag on
+# the drawing calls themselves (Pillow's ImageDraw has no antialiasing of
+# its own at 1x). 4x measured as enough that individual samples are no
+# longer visible on the rounded corners or the waveform strands at the
+# pill's actual on-screen size, without costing enough CPU/time per frame
+# to be visible at the waveform's ~20Hz tick rate.
+SCALE = 4
+
 COLORS = {
-    "red": "#ff5c5c",
-    "white": "#f2f2f2",
-    "green": "#59d973",
-    "orange": "#ffa640",
-    "gray": "#b3b3b3",
+    "red": (255, 92, 92, 255),
+    "white": (242, 242, 242, 255),
+    "green": (89, 217, 115, 255),
+    "orange": (255, 166, 64, 255),
+    "gray": (179, 179, 179, 255),
 }
-BG_CAPSULE = "#141414"        # opaque stand-in for the Mac version's translucent black
-TRANSPARENT_KEY = "#010203"   # colorkey -- must never appear in any drawn shape
+BG_CAPSULE = (20, 20, 20, 224)  # ~0.88 alpha -- same translucent black as overlay_mac's
+WAVE_BG = (0, 0, 0, 235)
+
+BTN_H = 26
+NOTNOW_W = 74
+UPDATE_W = 66
+BTN_GAP = 8
+BTN_RIGHT_MARGIN = 14
+NOTNOW_X0 = PANEL_W - BTN_RIGHT_MARGIN - NOTNOW_W
+UPDATE_X0 = NOTNOW_X0 - BTN_GAP - UPDATE_W
+BTN_Y0 = (PANEL_H - BTN_H) / 2.0
+MSG_X = 16
+MSG_W_INTERACTIVE = UPDATE_X0 - BTN_GAP - MSG_X
+UPDATE_BG, UPDATE_FG = (76, 184, 107, 255), (255, 255, 255, 255)
+NOTNOW_BG, NOTNOW_FG = (58, 58, 58, 255), (209, 209, 209, 255)
 
 WAVE_TICK_MS = 50  # ~20Hz, matches overlay_mac's WAVE_TICK_HZ
 WAVE_LEVEL_GAIN = 55.0
 NOISE_GATE = 0.4
 MAX_AMPLITUDE_THRESHOLD = 0.55
 WAVE_LINE_COUNT = 6
-WAVE_LINE_WIDTH = 1
+WAVE_LINE_ALPHA = 140
+WAVE_LINE_WIDTH = 2
 WAVE_COMPONENTS = [(1.6, 0.55), (3.1, 0.30), (5.0, 0.15)]
+
+TEXT_SIZE = 15      # ~ Segoe UI 11pt at 96 DPI
+BTN_TEXT_SIZE = 14  # ~ Segoe UI 10pt at 96 DPI
+_FONT_PATH = r"C:\Windows\Fonts\segoeui.ttf"
+_font_cache = {}
+
+
+def _font(size):
+    """Cached PIL font handle at the given (already SCALE-multiplied) pixel
+    size. Falls back to Pillow's bitmap default font on the rare machine
+    missing Segoe UI outright -- ugly, but keeps the pill legible rather
+    than raising and killing the overlay thread."""
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.truetype(_FONT_PATH, size)
+        except OSError:
+            _font_cache[size] = ImageFont.load_default()
+    return _font_cache[size]
+
 
 _active_overlay = None
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", ctypes.c_ulong)]
+
+
 def _monitor_rect_under_cursor():
-    """(left, top, right, bottom) of the monitor containing the cursor, in
-    Win32 screen coordinates (origin top-left)."""
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                    ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-
-    user32 = ctypes.windll.user32
-    pt = POINT()
+    """(left, top, right, bottom, hmonitor) of the monitor containing the
+    cursor, in Win32 physical screen coordinates (origin top-left) -- these
+    are real physical pixels, not the pre-Per-Monitor-V2 "virtualized"
+    coordinates an unaware process would see, since _make_dpi_aware() above
+    already ran before any window (and so before this is ever called)."""
+    pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     MONITOR_DEFAULTTONEAREST = 2
     hmon = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
-    info = MONITORINFO()
-    info.cbSize = ctypes.sizeof(MONITORINFO)
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
     user32.GetMonitorInfoW(hmon, ctypes.byref(info))
     r = info.rcMonitor
-    return r.left, r.top, r.right, r.bottom
+    return r.left, r.top, r.right, r.bottom, hmon
 
 
-def _rect_for(w, h):
-    left, top, right, bottom = _monitor_rect_under_cursor()
+def _dpi_scale_for_monitor(hmon) -> float:
+    """This monitor's DPI scale relative to 96 ("100%"), e.g. 1.5 at a
+    144 DPI ("150%") setting. Recomputed fresh on every draw (never
+    cached) specifically so a window that moves to a different monitor
+    between one frame and the next always renders at that monitor's
+    actual current scale, rather than whatever scale happened to be
+    current when a value was last cached."""
+    dpi_x = ctypes.c_uint()
+    dpi_y = ctypes.c_uint()
+    MDT_EFFECTIVE_DPI = 0
+    try:
+        shcore.GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+        if dpi_x.value > 0:
+            return dpi_x.value / 96.0
+    except (AttributeError, OSError):
+        pass
+    return 1.0
+
+
+def _rect_for(logical_w, logical_h):
+    """Screen position and actual (DPI-scaled) pixel size for a panel whose
+    *logical* footprint -- i.e. its size at Windows' 96-DPI "100%" baseline
+    -- is logical_w x logical_h. Returns (x, y, scaled_w, scaled_h,
+    dpi_scale) so callers render at the same scale the window is actually
+    placed at, rather than the two ever disagreeing."""
+    left, top, right, bottom, hmon = _monitor_rect_under_cursor()
+    dpi_scale = _dpi_scale_for_monitor(hmon)
+    w = round(logical_w * dpi_scale)
+    h = round(logical_h * dpi_scale)
     x = left + ((right - left) - w) // 2
     # Win32 is top-left origin, unlike Cocoa's bottom-left (where the Mac
     # version's "y = origin.y + 80" means 80px up from the bottom) -- so
     # "80px up from the bottom" here is bottom minus 80 minus the panel
-    # height, not a literal +80.
-    y = bottom - 80 - h
-    return x, y
+    # height, not a literal +80. The 80px gap is itself scaled so it reads
+    # as the same physical distance from the screen edge on every monitor.
+    y = bottom - round(80 * dpi_scale) - h
+    return x, y, w, h, dpi_scale
+
+
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+
+user32 = ctypes.windll.user32
+gdi32 = ctypes.windll.gdi32
+shcore = ctypes.windll.shcore
+
+
+class _BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", ctypes.c_ubyte),
+        ("BlendFlags", ctypes.c_ubyte),
+        ("SourceConstantAlpha", ctypes.c_ubyte),
+        ("AlphaFormat", ctypes.c_ubyte),
+    ]
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _SIZE(ctypes.Structure):
+    _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32),
+        ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32),
+        ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16),
+        ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32),
+        ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32),
+        ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+class _BITMAPINFO(ctypes.Structure):
+    # bmiColors is unused (and never read by CreateDIBSection) for 32bpp
+    # BI_RGB -- present only because BITMAPINFO's layout requires a color
+    # table field to exist at all.
+    _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
+
+
+# Every one of these handle-bearing functions needs an explicit argtypes/
+# restype: ctypes' default marshaling for an undeclared foreign function
+# assumes a 32-bit C int, and a GDI/window handle on 64-bit Windows is a
+# full pointer-sized value that can exceed that range. Left undeclared,
+# this doesn't fail reliably -- it depends on whether a given handle's
+# numeric value happens to fit in 32 bits, which varies by process and
+# handle-table state -- confirmed by a real crash in production
+# (ctypes.ArgumentError: OverflowError on CreateCompatibleDC) that never
+# reproduced in local testing before it shipped. c_void_p is used uniformly
+# for every handle type (HDC, HBITMAP, the generic HGDIOBJ SelectObject
+# takes/returns) rather than picking out the exact wintypes name for each,
+# since all of them are equally just opaque pointer-sized values to ctypes.
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.GetCursorPos.restype = wintypes.BOOL
+user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+user32.MonitorFromPoint.restype = ctypes.c_void_p
+user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = ctypes.c_void_p
+user32.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.GetParent.argtypes = [wintypes.HWND]
+user32.GetParent.restype = wintypes.HWND
+user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongW.restype = ctypes.c_long
+user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+user32.SetWindowLongW.restype = ctypes.c_long
+user32.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND, ctypes.c_void_p, ctypes.POINTER(_POINT), ctypes.POINTER(_SIZE),
+    ctypes.c_void_p, ctypes.POINTER(_POINT), wintypes.COLORREF,
+    ctypes.POINTER(_BLENDFUNCTION), wintypes.DWORD,
+]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.CreateDIBSection.argtypes = [
+    ctypes.c_void_p, ctypes.POINTER(_BITMAPINFO), wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+]
+gdi32.CreateDIBSection.restype = ctypes.c_void_p
+gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32.SelectObject.restype = ctypes.c_void_p
+gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+gdi32.DeleteObject.restype = wintypes.BOOL
+shcore.GetDpiForMonitor.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.POINTER(ctypes.c_uint),
+]
+shcore.GetDpiForMonitor.restype = ctypes.c_long
+
+
+def _make_dpi_aware():
+    """Declares Per-Monitor-V2 DPI awareness for the whole process. Must run
+    at module import time, here, before Tkinter's root (or any other
+    window) exists -- DPI awareness can only be set once, before a
+    process's first window is created.
+
+    Without this, Windows treats the process as DPI-unaware and silently
+    bitmap-stretches this window to compensate for whatever DPI it assumes
+    applies -- and that invisible compensation is what actually produced
+    the reported bug: the pill's rendered size and position visibly
+    changing as it moved between monitors with different scale factors
+    (e.g. a laptop panel at 150% next to an external monitor at 100%).
+    Our own geometry math (_rect_for) and Windows' compensating stretch
+    were each assuming a different scale was in charge for the same
+    window, and which one currently "won" depended on which monitor the
+    cursor happened to be on when a frame was drawn.
+
+    Falls through progressively older, less capable awareness APIs for
+    Windows versions where the newer ones aren't available. Even the last
+    resort (plain SetProcessDPIAware, "System DPI Aware") is a real
+    improvement over the unaware default: it stops Windows' per-monitor
+    virtualization outright, though unlike Per-Monitor-V2 it can't track a
+    *change* in DPI as the window later moves to a differently-scaled
+    monitor -- _dpi_scale_for_monitor's own per-draw lookup covers that gap
+    by recomputing the actual monitor's DPI on every frame regardless."""
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+    try:
+        if user32.SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return
+    except (AttributeError, OSError):
+        pass
+    PROCESS_PER_MONITOR_DPI_AWARE = 2
+    try:
+        if shcore.SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == 0:  # S_OK
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+_make_dpi_aware()
 
 
 def _make_click_through(root):
     root.update_idletasks()
-    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-    GWL_EXSTYLE = -20
-    WS_EX_LAYERED = 0x00080000
-    WS_EX_TRANSPARENT = 0x00000020
-    style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    ctypes.windll.user32.SetWindowLongW(
-        hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT
-    )
+    hwnd = user32.GetParent(root.winfo_id())
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+    return hwnd
 
 
-def _rounded_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
-    """Canvas has no native corner-radius primitive -- approximate with a
-    smoothed polygon whose corners are cut by `radius`."""
-    points = [
-        x0 + radius, y0, x1 - radius, y0, x1, y0, x1, y0 + radius,
-        x1, y1 - radius, x1, y1, x1 - radius, y1, x0 + radius, y1,
-        x0, y1, x0, y1 - radius, x0, y0 + radius, x0, y0,
-    ]
-    return canvas.create_polygon(points, smooth=True, **kwargs)
+def _set_click_through(hwnd, enabled: bool) -> None:
+    """Toggles WS_EX_TRANSPARENT on the already-layered window -- used to let
+    clicks land on the Update/Not-now buttons while the pill is showing them,
+    without giving up click-through the rest of the time (Mac's equivalent is
+    panel.setIgnoresMouseEvents_ in overlay_mac.py). Independent of
+    UpdateLayeredWindow/ULW_ALPHA, which only controls the window's
+    appearance -- input delivery is governed by this style bit alone."""
+    style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    style = (style | WS_EX_TRANSPARENT) if enabled else (style & ~WS_EX_TRANSPARENT)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+
+
+def _premultiplied_bgra_bytes(img: Image.Image) -> bytes:
+    """RGBA PIL image -> premultiplied-alpha BGRA bytes, top-down row order
+    -- the exact pixel format UpdateLayeredWindow's ULW_ALPHA blend mode
+    requires (AC_SRC_ALPHA expects each color channel already multiplied by
+    its own alpha, not straight/unassociated alpha)."""
+    arr = np.asarray(img, dtype=np.uint16)  # H, W, 4 (RGBA)
+    alpha = arr[:, :, 3:4]
+    premultiplied_rgb = (arr[:, :, :3] * alpha // 255).astype(np.uint8)
+    bgra = np.dstack([
+        premultiplied_rgb[:, :, 2], premultiplied_rgb[:, :, 1], premultiplied_rgb[:, :, 0],
+        arr[:, :, 3].astype(np.uint8),
+    ])
+    return np.ascontiguousarray(bgra).tobytes()
+
+
+def _push_layered_frame(hwnd, img: Image.Image) -> None:
+    """Displays img (RGBA) as hwnd's entire visible appearance. hwnd must
+    already have WS_EX_LAYERED set (done once in _make_click_through)."""
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    w, h = img.size
+    pixel_bytes = _premultiplied_bgra_bytes(img)
+
+    hdc_screen = user32.GetDC(None)
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+
+    bmi = _BITMAPINFO()
+    bmi.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth = w
+    bmi.bmiHeader.biHeight = -h  # negative = top-down DIB, matching our row order
+    bmi.bmiHeader.biPlanes = 1
+    bmi.bmiHeader.biBitCount = 32
+    bmi.bmiHeader.biCompression = 0  # BI_RGB
+
+    ppv_bits = ctypes.c_void_p()
+    hbitmap = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0, ctypes.byref(ppv_bits), None, 0)
+    old_bitmap = gdi32.SelectObject(hdc_mem, hbitmap)
+    try:
+        ctypes.memmove(ppv_bits, pixel_bytes, len(pixel_bytes))
+
+        size = _SIZE(w, h)
+        pt_src = _POINT(0, 0)
+        blend = _BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+        # pptDst=None: leave the window at whatever position Tkinter's own
+        # root.geometry() already placed it at, rather than repositioning
+        # it here too -- one source of truth for position, same as before.
+        user32.UpdateLayeredWindow(
+            hwnd, hdc_screen, None, ctypes.byref(size),
+            hdc_mem, ctypes.byref(pt_src), 0, ctypes.byref(blend), ULW_ALPHA,
+        )
+    finally:
+        gdi32.SelectObject(hdc_mem, old_bitmap)
+        gdi32.DeleteObject(hbitmap)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(None, hdc_screen)
+
+
+def _rounded_rect(draw, x0, y0, x1, y1, radius, fill):
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill)
+
+
+def _render_status(text, color, interactive, dpi_scale=1.0) -> Image.Image:
+    s = SCALE
+    logical_w = round(PANEL_W * dpi_scale)
+    logical_h = round(PANEL_H * dpi_scale)
+    w, h = logical_w * s, logical_h * s
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    _rounded_rect(draw, 0, 0, w - 1, h - 1, h // 2, BG_CAPSULE)
+    fg = COLORS.get(color, COLORS["white"])
+    sc = lambda v: round(v * dpi_scale)  # logical px -> this monitor's physical px
+    if interactive:
+        draw.text((sc(MSG_X) * s, h / 2), text, font=_font(sc(TEXT_SIZE) * s), fill=fg, anchor="lm")
+        for x0, bw, label, bg, btn_fg in (
+            (UPDATE_X0, UPDATE_W, "Update", UPDATE_BG, UPDATE_FG),
+            (NOTNOW_X0, NOTNOW_W, "Not now", NOTNOW_BG, NOTNOW_FG),
+        ):
+            by0, bh = sc(BTN_Y0) * s, sc(BTN_H) * s
+            bx0, bx1, by1 = sc(x0) * s, sc(x0 + bw) * s, by0 + bh
+            _rounded_rect(draw, bx0, by0, bx1, by1, bh // 2, bg)
+            draw.text(((bx0 + bx1) / 2, (by0 + by1) / 2), label,
+                      font=_font(sc(BTN_TEXT_SIZE) * s), fill=btn_fg, anchor="mm")
+    else:
+        draw.text((w / 2, h / 2), text, font=_font(sc(TEXT_SIZE) * s), fill=fg, anchor="mm")
+    return img.resize((logical_w, logical_h), Image.LANCZOS)
+
+
+def _render_wave_background(dpi_scale=1.0) -> Image.Image:
+    s = SCALE
+    w = round(WAVE_PANEL_W * dpi_scale) * s
+    h = round(WAVE_PANEL_H * dpi_scale) * s
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    _rounded_rect(draw, 0, 0, w - 1, h - 1, h // 2, WAVE_BG)
+    return img
+
+
+def _render_wave_frame(bg: Image.Image, amp: float, phase: float, dpi_scale=1.0) -> Image.Image:
+    s = SCALE
+    img = bg.copy()
+    draw = ImageDraw.Draw(img)
+    ww = round((WAVE_PANEL_W - WAVE_MARGIN * 2) * dpi_scale) * s
+    hh = round((WAVE_PANEL_H - WAVE_MARGIN * 2) * dpi_scale) * s
+    margin = round(WAVE_MARGIN * dpi_scale) * s
+    cy = margin + hh / 2.0
+    max_amp = hh * 0.48
+    line_amp_base = amp * max_amp
+    steps = 90
+    for i in range(WAVE_LINE_COUNT):
+        line_amp = line_amp_base * (1.0 - i * 0.1)
+        phase_off = i * 0.55
+        pts = []
+        for step in range(steps + 1):
+            t = step / steps
+            x = margin + ww * t
+            envelope = math.sin(math.pi * t)
+            y = cy + line_amp * envelope * sum(
+                weight * math.sin(2 * math.pi * freq * t + phase + phase_off)
+                for freq, weight in WAVE_COMPONENTS
+            )
+            pts.append((x, y))
+        line_w = max(1, round(WAVE_LINE_WIDTH * dpi_scale)) * s // 2
+        draw.line(pts, fill=(255, 255, 255, WAVE_LINE_ALPHA), width=line_w, joint="curve")
+    logical_w = round(WAVE_PANEL_W * dpi_scale)
+    logical_h = round(WAVE_PANEL_H * dpi_scale)
+    return img.resize((logical_w, logical_h), Image.LANCZOS)
 
 
 class StatusOverlay:
@@ -124,28 +484,35 @@ class StatusOverlay:
         self._smoothed = 0.0   # audio callback thread, no queue hop --
         self._phase = 0.0      # same as overlay_mac's pushRawLevel_/tick_.
         self._recording = False
+        self._on_click = None  # armed only while showing an interactive state
+        self._update_btn_rect = None   # (x0, y0, x1, y1) in window-local pixels
+        self._notnow_btn_rect = None
+        self._last_text = ""           # for _resolve_click's button-only redraw
+        self._last_color = "white"
+        # Rendered lazily in _draw_recording_frame, keyed to the dpi_scale it
+        # was rendered at -- see that method for why this can't just be
+        # rendered once here at a fixed, assumed scale.
+        self._wave_bg = None
+        self._wave_dpi_scale = None
+        self._dpi_scale = 1.0  # updated by _position() on every draw
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.wm_attributes("-topmost", True)
-        self.root.configure(bg=TRANSPARENT_KEY)
-        self.root.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
         self.root.withdraw()  # start hidden until the first show()/show_recording()
 
-        self.canvas = tk.Canvas(self.root, highlightthickness=0, bg=TRANSPARENT_KEY)
-        self.canvas.pack(fill="both", expand=True)
-
-        _make_click_through(self.root)
+        self._hwnd = _make_click_through(self.root)
+        self.root.bind("<Button-1>", self._on_click_event)
         self.root.after(WAVE_TICK_MS, self._pump)
         _active_overlay = self
 
     # ---------- public, thread-safe API ----------
 
-    def show(self, text, color="white", hide_after=None):
+    def show(self, text, color="white", hide_after=None, on_click=None):
         with self._seq_lock:
             self._seq += 1
             seq = self._seq
-        self._q.put(("show", text, color, hide_after, seq))
+        self._q.put(("show", text, color, hide_after, on_click, seq))
 
     def show_recording(self):
         with self._seq_lock:
@@ -182,9 +549,9 @@ class StatusOverlay:
     def _handle(self, cmd):
         kind = cmd[0]
         if kind == "show":
-            _, text, color, hide_after, seq = cmd
+            _, text, color, hide_after, on_click, seq = cmd
             self._recording = False
-            self._draw_status(text, color)
+            self._draw_status(text, color, on_click)
             if hide_after is not None:
                 self.root.after(int(hide_after * 1000), lambda: self._hide_if_current(seq))
         elif kind == "show_recording":
@@ -201,28 +568,92 @@ class StatusOverlay:
             if seq != self._seq:
                 return  # a newer message already superseded this one
         self._recording = False
+        self._on_click = None
+        self._update_btn_rect = self._notnow_btn_rect = None
+        _set_click_through(self._hwnd, True)
         self.root.withdraw()
 
-    def _position(self, w, h):
-        x, y = _rect_for(w, h)
+    def _position(self, logical_w, logical_h):
+        """logical_w/h are the panel's 96-DPI ("100%") size. Positions and
+        sizes the root window for whichever monitor the cursor is on right
+        now, and returns that monitor's dpi_scale so the caller renders at
+        the same scale the window was actually placed at -- see _rect_for's
+        docstring for why those two must never disagree."""
+        x, y, w, h, dpi_scale = _rect_for(logical_w, logical_h)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self._dpi_scale = dpi_scale
+        return dpi_scale
 
-    def _draw_status(self, text, color):
-        self._position(PANEL_W, PANEL_H)
-        self.canvas.delete("all")
-        _rounded_rect(self.canvas, 0, 0, PANEL_W, PANEL_H, PANEL_H // 2, fill=BG_CAPSULE, outline="")
-        self.canvas.create_text(
-            PANEL_W // 2, PANEL_H // 2, text=text,
-            fill=COLORS.get(color, COLORS["white"]),
-            font=("Segoe UI", 11), anchor="c",
-        )
+    def _draw_status(self, text, color, on_click=None):
+        dpi_scale = self._position(PANEL_W, PANEL_H)
+        self._last_text, self._last_color = text, color
+        self._on_click = on_click
+        interactive = on_click is not None
+        if interactive:
+            sc = lambda v: round(v * dpi_scale)
+            y0 = sc(BTN_Y0)
+            self._update_btn_rect = (sc(UPDATE_X0), y0, sc(UPDATE_X0 + UPDATE_W), y0 + sc(BTN_H))
+            self._notnow_btn_rect = (sc(NOTNOW_X0), y0, sc(NOTNOW_X0 + NOTNOW_W), y0 + sc(BTN_H))
+        else:
+            self._update_btn_rect = self._notnow_btn_rect = None
+        _push_layered_frame(self._hwnd, _render_status(text, color, interactive, dpi_scale))
+        _set_click_through(self._hwnd, not interactive)
         self.root.deiconify()
 
+    def _on_click_event(self, event):
+        # Bound directly on root rather than routed through a Canvas: once
+        # this window is truly layered (UpdateLayeredWindow), Windows stops
+        # delivering WM_PAINT to it or its children, so a Canvas widget's
+        # own drawing would never be shown -- but mouse input still is,
+        # which is all a plain root-level binding needs.
+        if self._update_btn_rect and _point_in_rect(event.x, event.y, self._update_btn_rect):
+            self._on_update_click()
+        elif self._notnow_btn_rect and _point_in_rect(event.x, event.y, self._notnow_btn_rect):
+            self._on_notnow_click()
+
+    def _resolve_click(self, cb):
+        # Clear the callback and re-arm click-through *before* invoking it,
+        # so a second click delivered a moment later can never re-fire or
+        # double-fire -- same ordering as overlay_mac's _resolve_. Redraws
+        # without the buttons but keeps the same message text, matching Mac
+        # (which hides the button views but doesn't touch the label) -- the
+        # caller is expected to immediately show() a new message, except
+        # "Not now" (cb is None), which has nothing coming and so withdraws
+        # the pill outright, matching overlay_mac's handle_dismiss.
+        text, color = self._last_text, self._last_color
+        self._on_click = None
+        self._update_btn_rect = self._notnow_btn_rect = None
+        _set_click_through(self._hwnd, True)
+        if cb is not None:
+            # Reuses self._dpi_scale rather than re-querying the monitor:
+            # the window isn't being repositioned here, so the render must
+            # match whatever scale _position() last actually placed it at.
+            _push_layered_frame(self._hwnd, _render_status(text, color, False, self._dpi_scale))
+            cb()
+        else:
+            self.root.withdraw()
+
+    def _on_update_click(self):
+        cb = self._on_click
+        self._resolve_click(cb)
+
+    def _on_notnow_click(self):
+        self._resolve_click(None)
+
     def _draw_recording_frame(self):
-        self._position(WAVE_PANEL_W, WAVE_PANEL_H)
-        self.canvas.delete("all")
-        _rounded_rect(self.canvas, 0, 0, WAVE_PANEL_W, WAVE_PANEL_H,
-                      WAVE_PANEL_H // 2, fill="black", outline="")
+        dpi_scale = self._position(WAVE_PANEL_W, WAVE_PANEL_H)
+        # The wave background is cached across ticks (regenerating a static
+        # rounded-rect on every 20Hz tick would be wasted work), but a fixed
+        # cache would go stale the moment this window moves to a
+        # differently-scaled monitor between recordings -- regenerate
+        # whenever the scale actually changes, not just once ever.
+        if self._wave_bg is None or self._wave_dpi_scale != dpi_scale:
+            self._wave_bg = _render_wave_background(dpi_scale)
+            self._wave_dpi_scale = dpi_scale
+        self._on_click = None
+        self._update_btn_rect = self._notnow_btn_rect = None
+        _set_click_through(self._hwnd, True)
+        _push_layered_frame(self._hwnd, self._wave_bg)
         self.root.deiconify()
 
     def _tick_waveform(self):
@@ -235,28 +666,14 @@ class StatusOverlay:
             self._smoothed = self._smoothed * 0.75 + lvl * 0.25  # slow release
         amp = min(1.0, self._smoothed / MAX_AMPLITUDE_THRESHOLD)
         self._phase += 0.05 + amp * 0.22
+        _push_layered_frame(
+            self._hwnd, _render_wave_frame(self._wave_bg, amp, self._phase, self._wave_dpi_scale)
+        )
 
-        self.canvas.delete("wave")
-        w = WAVE_PANEL_W - WAVE_MARGIN * 2
-        h = WAVE_PANEL_H - WAVE_MARGIN * 2
-        cy = WAVE_MARGIN + h / 2.0
-        max_amp = h * 0.48
-        line_amp_base = amp * max_amp
-        steps = 40
-        for i in range(WAVE_LINE_COUNT):
-            line_amp = line_amp_base * (1.0 - i * 0.1)
-            phase_off = i * 0.55
-            pts = []
-            for s in range(steps + 1):
-                t = s / steps
-                x = WAVE_MARGIN + w * t
-                envelope = math.sin(math.pi * t)
-                y = cy + line_amp * envelope * sum(
-                    weight * math.sin(2 * math.pi * freq * t + self._phase + phase_off)
-                    for freq, weight in WAVE_COMPONENTS
-                )
-                pts.extend((x, y))
-            self.canvas.create_line(*pts, fill="white", width=WAVE_LINE_WIDTH, tags="wave")
+
+def _point_in_rect(x, y, rect):
+    x0, y0, x1, y1 = rect
+    return x0 <= x <= x1 and y0 <= y <= y1
 
 
 def run_event_loop():

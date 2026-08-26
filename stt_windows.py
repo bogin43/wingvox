@@ -7,12 +7,53 @@ run_model() differs from stt_mac's."""
 import os
 import threading
 
+import platform_compat as pc
+
+
+def _configured_language() -> str:
+    """Whisper language code from language.txt, or "en" if unset/missing.
+
+    Duplicates the handful of lines in flow.py's load_language_choice()
+    rather than importing it: flow.py imports this module near its own top,
+    before its own LANGUAGE_PATH/load_language_choice() are even defined,
+    so importing back the other way isn't available here."""
+    try:
+        code = (pc.data_dir() / "language.txt").read_text(encoding="utf-8").strip().lower()
+        return code or "en"
+    except OSError:
+        return "en"
+
+
 # large-v3-turbo (the Mac default) is fast there because mlx runs it on
 # Apple Silicon's GPU/Neural Engine. On a random Windows laptop with no GPU,
 # the same model on CPU would feel sluggish for a push-to-talk tool where
 # perceived latency matters — default to a CPU-safe small model instead, with
 # an escape hatch for anyone who does have a CUDA GPU.
-WHISPER_MODEL = os.environ.get("WINGVOX_WHISPER_MODEL", "small.en")
+#
+# base.en/base over small.en/small: measured on a real low-power laptop CPU
+# (i5-8250U, no CUDA) -- small.en took long enough per dictation that
+# perceived latency was the top complaint about the Windows build. base.en
+# decoded a benchmark clip roughly 3x faster than small.en there (1.15s vs
+# 3.59s for a 4s clip) and is about a third the download size, at a real
+# but modest accuracy cost -- an explicit trade a user asked for after
+# comparing against the Mac build's speed. WINGVOX_WHISPER_MODEL is still
+# there to go back to small.en/small (or up to medium/large) for anyone
+# who'd rather trade the speed back for accuracy.
+#
+# base.en (English-only) and base (multilingual) are the same size/speed
+# class -- the only difference is language coverage -- so there's no CPU-
+# latency cost to picking the right one automatically from language.txt,
+# instead of leaving language.txt and WINGVOX_WHISPER_MODEL to be paired up
+# by hand. Previously: setting language.txt to anything but English was
+# silently ineffective on Windows, since an .en-suffixed model can't decode
+# other languages no matter what language= is passed to transcribe() --
+# confirmed by a real user, who got fluent-sounding nonsense (Portuguese
+# transcribed as vaguely-similar-sounding English words) rather than an
+# error.
+WHISPER_MODEL = os.environ.get(
+    "WINGVOX_WHISPER_MODEL",
+    "base.en" if _configured_language() == "en" else "base",
+)
 
 _model = None
 _model_lock = threading.Lock()
@@ -36,12 +77,10 @@ def run_model(audio, prompt, language="en"):
     """Returns a list of segment dicts with at least text/no_speech_prob/
     compression_ratio, matching stt_mac.run_model's contract.
 
-    language is accepted for parity with stt_mac's signature, but WHISPER_MODEL
-    defaults to "small.en" -- an English-only model variant that can't decode
-    other languages no matter what's passed here. A non-English language.txt
-    setting is silently ineffective on Windows until WINGVOX_WHISPER_MODEL is
-    also set to a multilingual model (e.g. "small") by hand; flow.py doesn't
-    enforce that pairing today."""
+    language is accepted for parity with stt_mac's signature, but has no
+    effect on which weights get loaded -- WHISPER_MODEL above already picks
+    "base.en" vs "base" from language.txt at import time, before this is
+    ever called."""
     model = _get_model()
     with _transcribe_lock:
         segments, _info = model.transcribe(

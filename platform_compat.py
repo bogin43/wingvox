@@ -4,6 +4,7 @@ ones; flow.py imports names from here instead of branching inline."""
 
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -66,47 +67,165 @@ def mac_hotkey_keys(choice: str):
     return (keyboard.Key.alt_r,)
 
 
+def key_vk(key):
+    """VK code for a pynput Key enum member or KeyCode instance, or None if
+    it can't be determined. A Key enum member doesn't expose vk directly --
+    it has to go through .value (its underlying KeyCode) first; a bare
+    KeyCode (an arbitrary letter/digit/symbol the hotkey picker captured)
+    already carries .vk itself. pynput uses "vk" as the field name on both
+    Windows (a real Win32 virtual-key code) and macOS (Apple's virtual
+    keycode) -- different numbering systems, but this function doesn't need
+    to reconcile them: a captured key is only ever compared against others
+    captured on the same OS."""
+    value = key.value if isinstance(key, keyboard.Key) else key
+    return getattr(value, "vk", None)
+
+
+def hotkey_keys_for(key):
+    """Expands one configured hotkey (from hotkey_picker or a loaded
+    hotkey.txt) into the tuple on_press/on_release check membership
+    against. Needed because a single captured key can under-match: on
+    Windows, physical Right Alt can report as alt_r or alt_gr depending on
+    keyboard layout/driver (see the original HOTKEY_KEYS default below) --
+    a picker or loaded file that only ever compares against the literal
+    key it captured would silently lock out whichever of the two didn't
+    happen to fire that time."""
+    if IS_WINDOWS and key in (keyboard.Key.alt_r, keyboard.Key.alt_gr):
+        return (keyboard.Key.alt_r, keyboard.Key.alt_gr)
+    return (key,)
+
+
+_KEY_LABELS = {
+    keyboard.Key.alt_r: "Right Alt", keyboard.Key.alt_l: "Left Alt",
+    keyboard.Key.alt_gr: "Right Alt", keyboard.Key.ctrl_r: "Right Ctrl",
+    keyboard.Key.ctrl_l: "Left Ctrl", keyboard.Key.shift_r: "Right Shift",
+    keyboard.Key.shift_l: "Left Shift", keyboard.Key.cmd: "Command",
+    keyboard.Key.cmd_r: "Right Command", keyboard.Key.space: "Space",
+    keyboard.Key.tab: "Tab", keyboard.Key.caps_lock: "Caps Lock",
+}
+
+
+def key_label(key) -> str:
+    """Human-readable label for an arbitrary configured hotkey, for status
+    messages ("tap {label} to dictate"). Mac's "Option" wording for
+    alt_l/alt_r (MAC_HOTKEY_LABELS) is deliberately not handled here --
+    that's layered on by the caller, since this function stays
+    platform-neutral for every other key."""
+    if isinstance(key, keyboard.Key):
+        return _KEY_LABELS.get(key, key.name.replace("_", " ").title())
+    if key.char:
+        return key.char.upper()
+    return f"key #{key.vk}" if key.vk is not None else "Unknown key"
+
+
 if IS_WINDOWS:
     import ctypes
+    VK_LMENU = 0xA4
     VK_RMENU = 0xA5
 
-    def is_hotkey_physically_down(_choice: str = "right") -> bool:
+    # Raw WH_KEYBOARD_LL hook message constants, as handed to pynput's
+    # win32_event_filter via Listener._convert()/_handler() -- duplicated
+    # here rather than reaching into pynput's private Listener._WM_* class
+    # attributes (not part of its public API). See
+    # make_alt_suppressing_event_filter() below for why these matter.
+    WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+    WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
+    _PRESS_MESSAGES = (WM_KEYDOWN, WM_SYSKEYDOWN)
+    _RELEASE_MESSAGES = (WM_KEYUP, WM_SYSKEYUP)
+
+    def is_alt_family_vk(vk) -> bool:
+        """Whether vk is Left or Right Alt -- the two physical keys whose
+        bare tap+release trips Windows' menu-access-mode reflex
+        (GUI_INMENUMODE), which silently swallows a Ctrl+V that lands while
+        the focused window is still in that state. Confirmed by live
+        reproduction: SendInput a solitary Right-Alt hold+release into a
+        real window, GetGUIThreadInfo reports GUI_INMENUMODE set
+        afterward, and a following Ctrl+V doesn't land. Generic over
+        whichever key the user actually configured as the hotkey, not
+        hardcoded to Right Alt -- a non-Alt hotkey (Right Ctrl, a letter,
+        ...) needs none of this."""
+        return vk in (VK_LMENU, VK_RMENU)
+
+    def make_alt_suppressing_event_filter(hotkey_vk, guarded_on_press, guarded_on_release, get_listener):
+        """Builds the win32_event_filter for pynput's Listener that stops a
+        bare Alt-family hotkey from ever reaching GUI_INMENUMODE. Only
+        meaningful when is_alt_family_vk(hotkey_vk) is True -- callers must
+        skip installing this filter otherwise.
+
+        Why the recording state machine has to run *inside* this filter,
+        not a separate on_press/on_release pair: pynput's
+        Listener._convert() -- which is what invokes this filter -- runs
+        BEFORE the matching press/release message is posted to pynput's
+        own dispatch queue. Calling listener.suppress_event() from a
+        separate on_press/on_release callback (a previously abandoned
+        attempt) raises SystemHook.SuppressException from inside
+        _convert() itself, which unwinds before that queue-post ever
+        happens -- on_press/on_release then silently never fire for that
+        event at all, indistinguishable from the hotkey being dead
+        (confirmed by reading pynput's installed
+        keyboard/_win32.py + _util/win32.py). Running the same guarded
+        on_press/on_release closures directly from here, then suppressing
+        only after, sidesteps that: this sees the raw event first, drives
+        the state machine itself, and only then blocks the event from
+        ever reaching the OS's own default menu-mode handling.
+
+        A solitary Right Alt's key-up arrives as plain WM_KEYUP, not
+        WM_SYSKEYUP like every other Alt release -- confirmed via the same
+        live repro above. Matched across all four message types (not just
+        the SYS-prefixed ones) so that release isn't missed.
+
+        get_listener: a zero-arg callable returning the Listener instance
+        once constructed. The filter is passed in as a Listener()
+        constructor kwarg, so the Listener doesn't exist yet when this
+        closure is built -- by the time the filter itself actually runs,
+        listener.start() has already returned and the name is bound."""
+        alt_key = keyboard.Key.alt_r if hotkey_vk == VK_RMENU else keyboard.Key.alt_l
+
+        def _filter(msg, data):
+            if data.vkCode != hotkey_vk:
+                return True  # not the hotkey -- dispatch normally
+            if msg in _PRESS_MESSAGES:
+                guarded_on_press(alt_key)
+            elif msg in _RELEASE_MESSAGES:
+                guarded_on_release(alt_key)
+            else:
+                return True
+            get_listener().suppress_event()  # raises; never returns
+        return _filter
+
+    def is_hotkey_physically_down(key) -> bool:
         """Whether the dictation key is physically held right now, read from
         the hardware rather than from the keyboard hook.
 
         The hook has been observed to silently drop the release event for
         the dictation key (seen under UTM VM keyboard passthrough): the
         press fires, the matching release never does, and the recording
-        stays open forever. Callers poll this as a backstop. It reports on
-        exactly the key HOTKEY_KEYS accepts -- polling Left Alt too would
-        end a recording on an unrelated Alt+Tab.
+        stays open forever. Callers poll this as a backstop.
 
-        Windows has no hotkey choice yet, so _choice is accepted (to keep
-        one call signature across platforms) and ignored."""
-        return bool(ctypes.windll.user32.GetAsyncKeyState(VK_RMENU) & 0x8000)
+        key is whatever the user configured (via hotkey_picker or a loaded
+        hotkey.txt) -- resolved to a VK via key_vk() so this works for any
+        hotkey, not just the original hardcoded Right Alt."""
+        vk = key_vk(key)
+        if vk is None:
+            return True  # can't determine -- fail open, same as the Mac branch below
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
 elif IS_MAC:
-    # Apple's virtual keycodes are physical positions, not characters, so
-    # these are stable across keyboard layouts.
-    _KVK_RIGHT_OPTION = 61
-    _KVK_LEFT_OPTION = 58
-    _MAC_HOTKEY_VK = {"right": _KVK_RIGHT_OPTION, "left": _KVK_LEFT_OPTION}
-
-    def is_hotkey_physically_down(choice: str = "right") -> bool:
+    def is_hotkey_physically_down(key) -> bool:
         """Mac counterpart of the Windows check above. Same purpose: a
         dropped release must not be able to wedge a recording open, and a
         wedged recording can only be cleared by restarting the app."""
+        vk = key_vk(key)
+        if vk is None:
+            return True
         try:
             from Quartz import CGEventSourceKeyState, kCGEventSourceStateHIDSystemState
-            return bool(CGEventSourceKeyState(
-                kCGEventSourceStateHIDSystemState,
-                _MAC_HOTKEY_VK.get(choice, _KVK_RIGHT_OPTION),
-            ))
+            return bool(CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, vk))
         except Exception:
             # Can't read the hardware -- claim the key is still down so the
             # watchdog never ends a recording the user is in the middle of.
             return True
 else:
-    def is_hotkey_physically_down(_choice: str = "right") -> bool:
+    def is_hotkey_physically_down(_key=None) -> bool:
         return True
 
 
@@ -175,24 +294,91 @@ def request_input_monitoring() -> None:
         pass
 
 
+def _text_before_cursor_windows(max_chars: int):
+    """Windows counterpart of the Mac implementation below, via UI
+    Automation instead of the Accessibility API. Same contract: None means
+    "couldn't determine", never "empty field".
+
+    Two paths, tried in order:
+
+    1. TextPattern, for controls rich enough to expose it (Chrome/Electron
+       contenteditable, WordPad, Word). Moves only the caret range's Start
+       endpoint backward by max_chars characters rather than reading
+       DocumentRange (the whole field/document) and slicing in Python --
+       matters on a field holding a large document, where fetching the
+       entire text on every dictation would be needless latency for a
+       value only the last couple hundred characters of which are ever
+       used.
+
+    2. A classic Win32 EM_GETSEL message, for plain Edit/RichEdit controls
+       that don't support TextPattern at all -- confirmed directly against
+       real Notepad, whose text box exposes ValuePattern and
+       LegacyIAccessiblePattern but returns None for every TextPattern
+       variant. Gated on ValuePattern actually being present (an
+       affirmative "this is a text-bearing control" signal) so a control
+       that answers neither path isn't guessed at with an arbitrary
+       message send."""
+    try:
+        import uiautomation as auto
+        control = auto.GetFocusedControl()
+        if control is None:
+            return None
+        text_pattern = control.GetPattern(auto.PatternId.TextPattern)
+        if text_pattern is not None:
+            selection = text_pattern.GetSelection()
+            if not selection:
+                return None
+            before = selection[0].Clone()
+            # waitTime=0: uiautomation's default is an unconditional 0.5s
+            # sleep *after every call*, regardless of success -- confirmed
+            # by reading its source. Left at its default, this would add
+            # half a second of latency to every dictation that reaches
+            # this path, on a push-to-talk tool where perceived latency is
+            # exactly what WHISPER_MODEL's beam_size=1 (see stt_windows.py)
+            # exists to avoid.
+            before.MoveEndpointByUnit(
+                auto.TextPatternRangeEndpoint.Start, auto.TextUnit.Character,
+                -max_chars, waitTime=0,
+            )
+            return before.GetText(-1)
+
+        value_pattern = control.GetPattern(auto.PatternId.ValuePattern)
+        hwnd = control.NativeWindowHandle
+        if value_pattern is None or not hwnd:
+            return None
+        text = value_pattern.Value
+        if not isinstance(text, str):
+            return None
+        EM_GETSEL = 0x00B0
+        start = ctypes.c_uint()
+        end = ctypes.c_uint()
+        ctypes.windll.user32.SendMessageW(hwnd, EM_GETSEL, ctypes.byref(start), ctypes.byref(end))
+        return text[:start.value][-max_chars:]
+    except Exception:
+        return None
+
+
 def text_before_cursor(max_chars: int = 200):
     """Best-effort read of the text immediately before the caret in
-    whatever text field is currently focused, via the Accessibility API.
+    whatever text field is currently focused -- via the Accessibility API
+    on Mac, UI Automation's TextPattern on Windows.
 
     Lets flow.py's process() decide whether a dictation is starting a
     fresh sentence or continuing an unfinished one, and whether a space
     needs to go in before it, from what's actually in the field instead
-    of guessing from Wingvox's own dictation history. This is a more
-    sensitive use of the same Accessibility trust already granted for the
-    paste keystroke (has_accessibility_access() above): it reads nearby
-    field text, not just simulates a key press.
+    of guessing from Wingvox's own dictation history. On Mac this is a
+    more sensitive use of the same Accessibility trust already granted for
+    the paste keystroke (has_accessibility_access() above): it reads
+    nearby field text, not just simulates a key press.
 
     Returns None whenever this can't be determined -- no focused element,
-    the focused control doesn't expose AX text attributes (some Electron/
-    canvas-based editors don't), or anything else goes wrong. Callers
-    must treat None as "unknown, fall back to your own heuristic", not as
-    "empty field" -- a false "empty" would wrongly skip a needed space or
-    wrongly capitalize a continuation."""
+    the focused control doesn't expose text attributes (some Electron/
+    canvas-based editors don't, on either platform), or anything else goes
+    wrong. Callers must treat None as "unknown, fall back to your own
+    heuristic", not as "empty field" -- a false "empty" would wrongly skip
+    a needed space or wrongly capitalize a continuation."""
+    if IS_WINDOWS:
+        return _text_before_cursor_windows(max_chars)
     if not IS_MAC:
         return None
     try:
@@ -404,7 +590,21 @@ def data_dir() -> Path:
 def install_dir() -> Path:
     """The git checkout Wingvox runs from. Distinct from data_dir(): on
     Windows those are different places, and the update check has to look at
-    the checkout, not at %LOCALAPPDATA%."""
+    the checkout, not at %LOCALAPPDATA%.
+
+    Under a frozen PyInstaller build, __file__ resolves inside the
+    extracted _internal directory (dist/Wingvox/_internal), not the actual
+    checkout -- confirmed by testing: NOTICE_PATH (notice.py) silently
+    never found NOTICE.md there, so the first-run privacy notice never
+    appeared at all when running the real built .exe (the git-based update
+    check happened to keep working anyway, purely by coincidence -- dist/
+    sits inside the same repo, and `git -C` walks up looking for .git
+    regardless of which subdirectory it's pointed at). wingvox.spec's
+    COLLECT always places the exe at <repo>/dist/Wingvox/Wingvox.exe, so
+    climb three levels from the running executable's own path instead of
+    trusting __file__ when frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent.parent
     return Path(__file__).resolve().parent
 
 
@@ -427,51 +627,89 @@ def _git(*args, timeout=10):
 
 def update_command() -> str:
     """The one line a user runs to take an update. Kept here so the pill,
-    the log and the docs can't drift apart."""
+    the log and the docs can't drift apart -- historically they haven't:
+    the status pill used to show a hardcoded, wrong instruction instead of
+    calling this function, which is exactly the drift this centralization
+    is meant to prevent."""
     if IS_MAC:
         return (f"cd {install_dir()} && git pull && "
                 f"launchctl kickstart -k gui/$(id -u)/{LAUNCH_AGENT_LABEL}")
-    return (f"cd {install_dir()} && git pull, then run wingvox-off.cmd "
-            "followed by wingvox-on.cmd")
+    # `git pull` alone is not enough on Windows the way it is on Mac: Mac
+    # runs flow.py straight out of the checkout, so a pull takes effect on
+    # restart with nothing else needed. Windows runs a compiled PyInstaller
+    # exe in dist\Wingvox\ -- pulling new source leaves that exe untouched,
+    # so a plain restart (wingvox-off.cmd/wingvox-on.cmd) keeps running the
+    # OLD code while reporting itself up to date. update.ps1 does the pull
+    # AND the rebuild AND the restart, in that order.
+    return f"cd {install_dir()} && .\\update.ps1"
 
 
-def check_for_update():
-    """Is a newer commit published than the one running?
+def _new_remote_commit_subjects():
+    """Subject lines of commits published on origin/main since this
+    checkout's HEAD, oldest first -- or None if that can't be determined
+    (offline, no git, not a checkout).
 
-    Returns True (behind), False (current), or None (couldn't tell).
-
-    Read-only on purpose: `git ls-remote` asks the remote for its ref without
-    writing anything into the user's checkout, so this can't create a dirty
-    tree, a detached head, or a surprise merge. Deciding "behind" by SHA
-    inequality alone would be wrong on the development machine, where local
-    is *ahead* of the remote -- so the remote SHA is only treated as an
-    update when the local repository has never seen that commit.
-    """
+    Does a real `git fetch` rather than the lighter `ls-remote` a plain
+    "is there anything new" check could get away with -- check_for_update()
+    below needs each new commit's own message to decide which platform it's
+    tagged for, and that needs the commit objects actually present locally,
+    which is what fetch does. Still read-only with respect to the working
+    tree: fetch only downloads objects and updates origin/main's tracking
+    ref, so this can't create a dirty tree, a detached head, or a surprise
+    merge. Deciding "behind" by SHA inequality alone would be wrong on the
+    development machine, where local is *ahead* of the remote -- git's
+    `local..remote` range only ever lists commits reachable from remote
+    that local doesn't have, so this is correct either way."""
     local = _git("rev-parse", "HEAD")
     if not local:
         return None
-    remote_line = _git("ls-remote", "origin", "HEAD", timeout=15)
-    if not remote_line:
+    if _git("fetch", "origin", "main", timeout=20) is None:
         return None
-    remote = remote_line.split()[0]
-    if remote == local:
-        return False
-    # `git cat-file -e` succeeds only if this repo already has that object.
-    have_it = _git("cat-file", "-e", f"{remote}^{{commit}}")
-    return have_it is None
+    remote = _git("rev-parse", "origin/main")
+    if not remote or remote == local:
+        return []
+    subjects = _git("log", f"{local}..{remote}", "--format=%s")
+    return subjects.splitlines() if subjects is not None else None
 
 
-def run_update() -> str:
-    """Run update.sh and report what happened, via its WINGVOX_RESULT marker
-    line: 'dirty', 'up_to_date', 'needs_install', 'updated', or
-    'error:<reason>'. Mac-only -- there's no click-to-update path on Windows
-    yet (a code update there needs a full PyInstaller rebuild, not just a
-    pull). Meant to be called from a background thread: this function only
-    ever blocks its caller, never raises, so the caller never needs to catch
-    anything -- a timeout, a missing script, or unexpected output all fold
-    into a plain 'error:...' string same as an actual failure would."""
-    if not IS_MAC:
-        return "error:not supported on this platform"
+def check_for_update():
+    """Is a newer commit published than the one running, at all -- ignoring
+    which platform it's tagged for? Returns True/False/None (couldn't
+    tell). This is what run_update() checks before actually pulling:
+    clicking Update always converges this checkout to the real, current
+    origin/main, since there's one shared branch, not separate per-platform
+    ones -- see check_for_relevant_update() below for the platform-aware
+    version that gates the proactive notification instead."""
+    subjects = _new_remote_commit_subjects()
+    return None if subjects is None else bool(subjects)
+
+
+# A commit that only affects one platform gets its subject line tagged with
+# this at the front, e.g. "[windows] Fix ...". Untagged commits -- the
+# default, and everything pushed before this convention existed -- are
+# assumed to affect everyone.
+_PLATFORM_TAG_RE = re.compile(r"^\[(mac|windows)\]", re.IGNORECASE)
+
+
+def check_for_relevant_update():
+    """Same True/False/None contract as check_for_update(), but only counts
+    a new commit as an update worth telling THIS platform about, using the
+    [mac]/[windows] tag convention above. Used for the proactive pill and
+    the on-demand recall check (double-tap Control on Mac) -- not for what
+    clicking Update itself pulls, which is always everything regardless of
+    tags (see check_for_update())."""
+    subjects = _new_remote_commit_subjects()
+    if subjects is None:
+        return None
+    my_tag = "mac" if IS_MAC else "windows"
+    for subject in subjects:
+        m = _PLATFORM_TAG_RE.match(subject)
+        if m is None or m.group(1).lower() == my_tag:
+            return True
+    return False
+
+
+def _run_update_mac() -> str:
     script = install_dir() / "update.sh"
     if not script.exists():
         return "error:update.sh not found"
@@ -490,6 +728,67 @@ def run_update() -> str:
         if line.startswith("WINGVOX_RESULT:"):
             return line[len("WINGVOX_RESULT:"):].strip()
     return f"error:no result marker (exit {r.returncode})"
+
+
+def _run_update_windows() -> str:
+    """Unlike Mac's synchronous update.sh run above, this can't wait for
+    update.ps1 to finish and read its result: partway through, install.ps1
+    (which update.ps1 hands off to) stops the running Wingvox.exe -- which
+    is *this* process -- before it can rebuild the now-locked binary. A
+    subprocess.run() call waiting on that would simply never return, because
+    the process making the call is the one about to die. So the dirty/behind
+    checks below run directly in Python first (cheap, and don't touch
+    anything), and only the actual pull+rebuild+restart is handed off,
+    fire-and-forget, the same way Mac's launchctl kickstart -k tears its own
+    process down mid-update and lets a freshly-relaunched one take over.
+
+    update.ps1 is triggered via the separate "Wingvox-Updater" scheduled
+    task (install.ps1 registers it, trigger-less, run-on-demand only) rather
+    than spawned directly as a child of this process. A direct child
+    inherits this process's Task-Scheduler job, and update.ps1 stopping
+    Wingvox.exe partway through would risk taking its own job-mate down
+    with it. The obvious fix -- CREATE_BREAKAWAY_FROM_JOB -- turns out not
+    to be available here: confirmed by reproduction that CreateProcess
+    fails outright with WinError 5 (Access is denied) when asked to break
+    away from Wingvox's own Task-Scheduler job on this configuration, so
+    that flag can't be relied on. A separate top-level scheduled task has
+    no parent/job relationship to Wingvox.exe at all -- stopping Wingvox
+    can't affect it, no matter how Task Scheduler treats job membership on
+    a given Windows version."""
+    dirty = _git("status", "--short", "--untracked-files=no")
+    if dirty:
+        return "dirty"
+    behind = check_for_update()
+    if behind is None:
+        return "error:couldn't check for an update (offline, or not a git checkout)"
+    if behind is False:
+        return "up_to_date"
+    try:
+        r = subprocess.run(
+            ["schtasks", "/run", "/tn", "Wingvox-Updater"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as e:
+        return f"error:{e}"
+    if r.returncode != 0:
+        reason = (r.stderr or r.stdout).strip() or f"exit {r.returncode}"
+        return f"error:couldn't start the updater task ({reason})"
+    return "updated"
+
+
+def run_update() -> str:
+    """Take a published update and report what happened: 'dirty',
+    'up_to_date', 'needs_install' (Mac only -- see update.sh), 'updated', or
+    'error:<reason>'. Meant to be called from a background thread: this
+    function only ever blocks its caller, never raises, so the caller never
+    needs to catch anything -- a timeout, a missing script, or unexpected
+    output all fold into a plain 'error:...' string same as an actual
+    failure would."""
+    if IS_MAC:
+        return _run_update_mac()
+    if IS_WINDOWS:
+        return _run_update_windows()
+    return "error:not supported on this platform"
 
 
 # ---------- Windows: clear any stuck modifier before a simulated paste ----------
@@ -687,17 +986,55 @@ def wasapi_hostapi_index(sd):
     return None
 
 
+# Substrings Windows uses in a Bluetooth mic's device name -- seen in the
+# wild as e.g. "Headset (Bluetooth Hands-Free AG Audio)" or "Bluetooth
+# Hands-Free Audio". Not exhaustive (Windows has no stable, driver-independent
+# "this is Bluetooth" flag the way CoreAudio's transport type does), but these
+# two catch the labeling Windows itself generates for the HFP profile, which
+# is what a Bluetooth headset's *microphone* shows up as -- its higher-quality
+# A2DP profile is playback-only and never appears as an input device at all.
+_BLUETOOTH_MIC_HINTS = ("bluetooth", "hands-free")
+
+
 def default_windows_input_device(sd):
     """PortAudio's default host API on Windows is often MME (higher latency,
     occasionally flaky) rather than WASAPI. Return WASAPI's default input
-    device index, or None (caller falls back to the system default)."""
+    device index, or None (caller falls back to the system default).
+
+    Also steers away from a Bluetooth headset mic when one is the current
+    default: Bluetooth's HFP mic profile downgrades the *output* audio
+    quality on every app system-wide for as long as it's in use (not just
+    Wingvox's own recording), so a laptop's built-in mic is very likely the
+    better choice whenever both are available. Unlike Mac (mac_builtin_mic_name
+    above), there's no stable hardware identifier for "the built-in mic" on
+    Windows to match against directly -- this looks for the opposite signal
+    instead: any other WASAPI input device whose name doesn't look like a
+    Bluetooth mic. Imperfect on a desktop with no built-in mic and only USB
+    peripherals (it would just pick another arbitrary USB device), but that
+    case has no default worth preferring over the OS's own choice anyway."""
     if not IS_WINDOWS:
         return None
     try:
-        for api in sd.query_hostapis():
+        hostapis = sd.query_hostapis()
+        wasapi_index = None
+        for i, api in enumerate(hostapis):
             if "wasapi" in api["name"].lower():
-                device = api.get("default_input_device", -1)
-                return device if device >= 0 else None
+                wasapi_index = i
+                break
+        if wasapi_index is None:
+            return None
+        default_device = hostapis[wasapi_index].get("default_input_device", -1)
+        if default_device < 0:
+            return None
+        devices = sd.query_devices()
+        default_name = devices[default_device]["name"].lower()
+        if not any(hint in default_name for hint in _BLUETOOTH_MIC_HINTS):
+            return default_device
+        for i, d in enumerate(devices):
+            if (d["max_input_channels"] > 0 and d["hostapi"] == wasapi_index
+                    and not any(hint in d["name"].lower() for hint in _BLUETOOTH_MIC_HINTS)):
+                return i
+        return default_device  # no non-Bluetooth alternative found
     except Exception:
         pass
     return None

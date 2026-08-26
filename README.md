@@ -2,9 +2,10 @@
 
 **Website:** [bogin43.github.io/wingvox](https://bogin43.github.io/wingvox/)
 
-Fully offline voice dictation. Hold the dictation hotkey (**Right Option** on
-Mac, **Right Alt** on Windows), speak, release. Cleaned-up text is pasted
-wherever your cursor is focused.
+Fully offline voice dictation. Hold the dictation hotkey (you pick which key
+the first time Wingvox runs -- **Right Option** on Mac / **Right Alt** on
+Windows is a reasonable choice if you're not sure), speak, release.
+Cleaned-up text is pasted wherever your cursor is focused.
 
 Pipeline: mic -> Whisper (mlx-whisper on Apple Silicon Mac, faster-whisper on
 Intel Mac and Windows) -> Ollama qwen2.5:3b cleanup -> clipboard + paste.
@@ -63,16 +64,28 @@ any time to add it.
 Don't move the `~/wingvox` folder after installing — both the app and its
 background service reference this exact location.
 
-The dictation hotkey defaults to **Right Option**. To switch to **Left
-Option** (or back), run from the Wingvox folder:
+The first time Wingvox runs, it asks you to tap whatever key you'd like to
+use as the dictation hotkey (Right Option/Right Alt is a reasonable default
+if you're not sure), then shows what it caught and asks you to confirm
+before saving it -- so an accidental tap can't silently become the hotkey.
+To change it later, run from the Wingvox folder:
 
 ```bash
-./set-hotkey.sh left    # or: right
+./set-hotkey.sh
 ```
 
-Left Option isn't offered as the default because it prefixes real system
-shortcuts (Option+drag, Option+click, Option+Space for the dictionary
-lookup) -- those start a recording instead while Wingvox is running.
+On Windows, use `set-hotkey.cmd` instead -- `set-hotkey.sh` is a bash script
+that won't run there:
+
+```powershell
+.\set-hotkey.cmd
+```
+
+Picking **Left Option/Alt** comes with a heads-up: it prefixes real system
+shortcuts (Option+drag, Option+click, Option+Space for the dictionary lookup
+on Mac; Alt+Tab, Alt+F4 on Windows) -- those start a recording instead while
+Wingvox is running. Picking an ordinary letter/number key comes with a
+similar note: every normal press of it anywhere starts a recording too.
 
 Wingvox dictates in **English** by default. To dictate in another language,
 run from the Wingvox folder:
@@ -81,14 +94,22 @@ run from the Wingvox folder:
 ./set-language.sh fr   # French. Also: nl (Dutch, covers Flemish), es, de, pt, it, ...
 ```
 
+On Windows, use `set-language.cmd` instead (same arguments) -- `set-language.sh`
+is a bash script that looks for the Mac venv layout and won't run there:
+
+```powershell
+.\set-language.cmd fr
+```
+
 Whisper handles ~100 languages; the few named above are just the ones
 that print a friendly name. Any other ISO 639-1 code works too. Flemish
 has no separate code of its own -- it's transcribed as Dutch (`nl`), same
-written standard as Netherlands Dutch. Windows note: the default speech
-model is English-only, so this needs `WINGVOX_WHISPER_MODEL=small` set by
-hand too; `./set-language.sh` says so if you try it there.
+written standard as Netherlands Dutch. On Windows, this also switches the
+speech model from the English-only default to a multilingual one
+automatically.
 
-To update it later, run `./update.sh` from the Wingvox folder. Wingvox tells
+To update it later, run `./update.sh` from the Wingvox folder, or just click
+"Update" on the status pill when it shows one is available — Wingvox tells
 you when there's something to take; it never installs anything on its own.
 
 To remove it, run `./uninstall.sh` from the Wingvox folder. It stops Wingvox,
@@ -117,15 +138,29 @@ cd $env:USERPROFILE\wingvox
 Installs Ollama/Python as needed, downloads both models, builds `Wingvox.exe`,
 and registers a Task Scheduler entry so it starts automatically at login.
 Takes a few minutes, longer on a slow connection: the Whisper model
-(`small.en` by default — see `SETUP.md` for other sizes) is ~1GB and the
-cleanup model another ~2GB. Budget **~3.5GB of disk** for everything
+(`base.en` by default — see `SETUP.md` for other sizes) is ~0.15GB and the
+cleanup model another ~2GB. Budget **~2.5GB of disk** for everything
 (models, the Python environment, and the built app).
+
+**Smaller install.** The cleanup model is most of that download. To skip it:
+
+```powershell
+$env:WINGVOX_LITE = "1"
+.\install.ps1
+```
+
+That brings the install down to about **0.5GB**. Dictation still works —
+Whisper already produces punctuated text — but you lose the cleanup pass
+that strips "um" and "so like" and tidies sentence boundaries. Re-run the
+normal installer any time to add it.
 
 Don't move the `%USERPROFILE%\wingvox` folder after installing — the background
 task references this exact location.
 
-To update later, re-run the same one-liner: it pulls the latest code and
-re-installs over the top, keeping your glossary and corrections.
+To update later, click "Update" on the status pill when it shows one is
+available — it pulls the latest code, rebuilds, and restarts on its own.
+Or run `.\update.ps1` from the Wingvox folder (equivalent to re-running the
+one-liner): either way keeps your glossary and corrections.
 
 To remove it, run `.\uninstall.ps1` from the Wingvox folder.
 
@@ -246,7 +281,9 @@ WINGVOX_INPUT_DEVICE="MacBook Air Microphone" ./venv/bin/python flow.py
 
 **Windows**: no universal built-in-mic name to match, so it uses the system
 default input device, preferring the WASAPI host API over PortAudio's default
-(often MME, higher latency). Override with the same environment variable:
+(often MME, higher latency), and steering away from a connected Bluetooth
+headset's mic in favor of any other available input device when one is the
+current default. Override with the same environment variable:
 
 ```powershell
 $env:WINGVOX_INPUT_DEVICE = "Realtek"; .\venv\Scripts\python.exe flow.py
@@ -274,6 +311,11 @@ $env:WINGVOX_INPUT_DEVICE = "Realtek"; .\venv\Scripts\python.exe flow.py
 - Verified working with Wi-Fi off
 
 Windows performance depends heavily on the CPU (and GPU, if you have an NVIDIA
-card) — no benchmark numbers yet. The default `small.en` model is chosen to be
-usable on CPU-only laptops; set `WINGVOX_WHISPER_MODEL` to a bigger model if
-you have a CUDA GPU (see `SETUP.md`).
+card). Measured on a low-power CPU-only laptop (i5-8250U, no GPU): a 4s
+benchmark clip decoded in 3.59s on `small.en`, 1.15s on `base.en`, 0.61s on
+`tiny.en` (`compute_type="auto"` already selects the fastest correct CPU
+backend, int8, on its own — explicit thread-count tuning made no
+meaningful difference on this hardware). The default `base.en` model is
+chosen to prioritize speed on CPU-only laptops; set `WINGVOX_WHISPER_MODEL`
+to `small.en` or bigger for more accuracy, especially if you have a CUDA
+GPU (see `SETUP.md`).

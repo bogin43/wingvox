@@ -63,21 +63,27 @@ Write-Host "    Stopped."
 Step "Removing scheduled tasks"
 try { schtasks /delete /tn Wingvox /f 2>$null | Out-Null } catch {}
 Write-Host "    Removed 'Wingvox' (the dictation app)."
-# install.ps1 also registers its own logon task for Ollama, since winget's
-# package doesn't persist one. That task is Wingvox's doing, so it goes too
-# -- but only the task, not Ollama itself.
+try { schtasks /delete /tn Wingvox-Updater /f 2>$null | Out-Null } catch {}
+Write-Host "    Removed 'Wingvox-Updater' (the click-to-update helper task)."
+# Earlier versions registered a separate logon task to run `ollama serve`,
+# since winget's package doesn't persist one. install.ps1 no longer creates
+# this task (Wingvox starts Ollama itself, see start_ollama_background in
+# platform_compat.py) -- this is upgrade cleanup for machines that still
+# have the old task from before that change, not something a fresh install
+# ever creates. The /delete legitimately "fails" when there's nothing to
+# remove.
 try { schtasks /delete /tn Wingvox-Ollama /f 2>$null | Out-Null } catch {}
-Write-Host "    Removed 'Wingvox-Ollama' (the auto-start entry, not Ollama itself)."
+Write-Host "    Removed 'Wingvox-Ollama' if present (an old auto-start entry, not Ollama itself)."
 
 # ---------- 3. Built app ----------
 Step "Removing the built app"
 $leftovers = @()
-foreach ($item in @("dist", "build", "wingvox_task.xml")) {
+foreach ($item in @("dist", "build")) {
     $path = Join-Path $RepoDir $item
     if (-not (Remove-Stubbornly $path)) { $leftovers += $path }
 }
 if ($leftovers.Count -eq 0) {
-    Write-Host "    Removed dist\, build\, and the generated task XML."
+    Write-Host "    Removed dist\ and build\."
 } else {
     Write-Host "    Removed what it could, but these are still in use:"
     $leftovers | ForEach-Object { Write-Host "      $_" }
