@@ -73,10 +73,6 @@ WINGVOX_VERSION = "0.1.0"
 
 SAMPLE_RATE = 16000
 
-# Longest single dictation to keep, in samples. Past this the recorder stops
-# accumulating rather than growing without bound (see Recorder._callback).
-MAX_RECORDING_SECONDS = float(os.environ.get("WINGVOX_MAX_RECORDING_SECONDS", "180"))
-MAX_RECORDING_SAMPLES = int(SAMPLE_RATE * MAX_RECORDING_SECONDS)
 
 # Whisper's initial_prompt is capped at 224 tokens and silently truncates
 # past that, so an over-long glossary both stops helping and starts crowding
@@ -421,14 +417,8 @@ class Recorder:
             preferred = resolve_input_device(PREFERRED_INPUT_DEVICE)
 
             def _callback(indata, *_):
-                # Cap what a single recording can accumulate. A hotkey that
-                # never delivers its release (the watchdog covers the common
-                # case, but a genuinely stuck physical key doesn't look "up"
-                # to GetAsyncKeyState either) would otherwise grow this list
-                # for as long as the process runs, and then hand Whisper an
-                # hours-long clip to chew through.
-                if len(self._frames) * indata.shape[0] >= MAX_RECORDING_SAMPLES:
-                    return
+                # No duration cap -- a hands-free (tap-to-lock) dictation is
+                # meant to be able to run as long as someone wants to talk.
                 self._frames.append(indata.copy())
                 if self._on_level:
                     self._on_level(float(np.sqrt(np.mean(indata**2))))
@@ -876,6 +866,11 @@ def inject(text: str):
         pc.clipboard_set(text)
         time.sleep(0.15)
         pc.release_all_modifiers(_kb)
+        # Collapse Windows' Alt-menu-access-mode (armed by the hotkey's own
+        # bare Right Alt release) before it can eat this paste -- see
+        # collapse_alt_menu_mode's docstring.
+        pc.collapse_alt_menu_mode(_kb)
+        time.sleep(0.05)
         with _kb.pressed(pc.PASTE_MODIFIER):
             time.sleep(0.02)
             _kb.press("v")
@@ -930,6 +925,29 @@ def acquire_single_instance_lock() -> bool:
 # time. A single follow-up press, not another tap, stops it.
 TAP_MAX_SECONDS = 0.35
 
+# Either Control key, double-tapped, checks for an update on demand -- see
+# CONTROL_TAP_MAX_SECONDS/CONTROL_DOUBLE_TAP_WINDOW_SECONDS below. Deliberately
+# NOT the dictation hotkey itself: an earlier version reused a triple-tap of
+# Right Option for this, which turned out to collide with an unrelated global
+# gesture already bound to that key on real hardware (confirmed: it opened
+# another app's menu instead). Control is a different physical key from
+# dictation entirely, so this needs none of that version's care about undoing
+# accidental recording state -- it's just a tap counter. Either side (not
+# just Left) because some keyboards, including some MacBooks, have no
+# physical Right Control at all.
+CONTROL_KEYS = (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
+
+# A Control press-release cycle at or under this length counts as a tap.
+# Needed because Windows has been confirmed to auto-repeat a held key at the
+# OS level (~10/sec, see the on_press comment about HOTKEY_KEYS) -- without
+# requiring an actual release in between, simply holding Control for
+# something unrelated (Ctrl+drag, Ctrl+scroll-to-zoom) would auto-repeat
+# on_press fast enough to look like several taps in an instant.
+CONTROL_TAP_MAX_SECONDS = 0.35
+
+# Two Control taps inside this window is the deliberate double-tap gesture.
+CONTROL_DOUBLE_TAP_WINDOW_SECONDS = 0.6
+
 
 def run():
     if not acquire_single_instance_lock():
@@ -966,13 +984,18 @@ def run():
                   "Settings > Privacy & security > Microphone, then restart.")
     try:
         if pc.IS_MAC:
-            from overlay_mac import StatusOverlay, run_event_loop
+            from overlay_mac import StatusOverlay, MenuBarUpdateIcon, run_event_loop
+            menu_bar_icon = MenuBarUpdateIcon()
         else:
+            # No Windows tray-icon equivalent yet -- the double-tap-Control
+            # check and the plain-text pill (see _update_check) are the only
+            # recall path there for now.
             from overlay_windows import StatusOverlay, run_event_loop
+            menu_bar_icon = None
         overlay = StatusOverlay()
     except Exception as e:
         print(f"overlay unavailable ({e}), running terminal-only", file=sys.stderr)
-        overlay, run_event_loop = None, None
+        overlay, run_event_loop, menu_bar_icon = None, None, None
 
     def status(text, color="white", hide_after=None, on_click=None):
         print(f"  {text}")
@@ -1007,6 +1030,11 @@ def run():
         # next release (guards against OS key-repeat while stopping a locked
         # recording by holding instead of tapping).
         "locked": False, "press_started_at": 0.0, "ignore_until_release": False,
+        # Double-tap-Control-to-check-for-update tracking: whether either
+        # Control key is currently physically down (guards against OS
+        # key-repeat -- see CONTROL_TAP_MAX_SECONDS), when the current press
+        # of it started, and recent genuine tap timestamps.
+        "ctrl_down": False, "ctrl_press_started_at": 0.0, "recent_ctrl_taps": [],
     }
     finish_lock = threading.Lock()
 
@@ -1215,6 +1243,14 @@ def run():
         print(f"  latency: stt {t1-t0:.2f}s + cleanup {t2-t1:.2f}s = {time.time()-t0:.2f}s")
 
     def on_press(key):
+        if key in CONTROL_KEYS:
+            if not state["ctrl_down"]:
+                # First press of a hold, not OS key-repeat from holding it
+                # down for something else entirely (Ctrl+drag, Ctrl+scroll)
+                # -- only a genuine tap (see on_release) counts.
+                state["ctrl_down"] = True
+                state["ctrl_press_started_at"] = time.time()
+            return
         if key not in HOTKEY_KEYS:
             return
         if state["ignore_until_release"]:
@@ -1257,6 +1293,27 @@ def run():
         # win32_event_filter/suppress_event on the Listener itself.
 
     def on_release(key):
+        if key in CONTROL_KEYS:
+            state["ctrl_down"] = False
+            held = time.time() - state["ctrl_press_started_at"]
+            if held > CONTROL_TAP_MAX_SECONDS:
+                return  # a hold, not a tap -- doesn't count
+            now = time.time()
+            state["recent_ctrl_taps"] = [
+                t for t in state["recent_ctrl_taps"]
+                if now - t < CONTROL_DOUBLE_TAP_WINDOW_SECONDS
+            ]
+            state["recent_ctrl_taps"].append(now)
+            if len(state["recent_ctrl_taps"]) >= 2:
+                # Double-tap -- check for an update on demand. Works
+                # indefinitely, any time, not just right after the one
+                # automatic startup check -- clicking "Not now" (or even
+                # "Clear" on the menu bar icon) doesn't mean waiting around
+                # to change your mind. Entirely separate from the dictation
+                # hotkey/recording state machine -- nothing here to undo.
+                state["recent_ctrl_taps"] = []
+                threading.Thread(target=_check_and_show_update_status, daemon=True).start()
+            return
         if key not in HOTKEY_KEYS:
             return
         if state["ignore_until_release"]:
@@ -1366,6 +1423,33 @@ def run():
         status("Updating…", "gray")
         threading.Thread(target=_do_update, daemon=True, name="wingvox-update").start()
 
+    def _show_update_pill():
+        # Shared by the initial auto-check below and by the double-tap-
+        # Control recall gesture in on_press -- no hide_after, so it only
+        # goes away when Update or Not now is actually clicked, not on a
+        # timer (someone mid-conversation about it shouldn't come back to
+        # find it gone). Also (re-)arms the menu bar icon, so "Not now" or
+        # even someone previously clicking "Clear" on the icon itself never
+        # loses the update for good -- it comes back the next time this
+        # runs, and clicking the icon just reopens this same pill.
+        status("Update available", "orange", on_click=_handle_update_click)
+        if menu_bar_icon:
+            menu_bar_icon.show(_show_update_pill)
+
+    def _check_and_show_update_status():
+        # Triple-tap's target: a fresh check every time, not a replay of
+        # whatever _update_check() found once at startup -- so the gesture
+        # keeps working for as long as this run of Wingvox is behind, not
+        # just in the few seconds after the one automatic check. Runs on its
+        # own thread (called from on_press, which must never block on git).
+        behind = pc.check_for_update()
+        if behind:
+            _show_update_pill()
+        elif behind is False:
+            status("✓ You're on the most recent version", "green", hide_after=4)
+        else:
+            status("⚠ Couldn't check for updates (offline?)", "orange", hide_after=4)
+
     def _update_check():
         # Deliberately last and deliberately quiet. It waits for warm-up so
         # its pill doesn't stomp on "Ready", it never blocks startup, and a
@@ -1379,8 +1463,7 @@ def run():
         if behind:
             print(f"  Update available — run: {pc.update_command()}")
             if pc.IS_MAC:
-                status("Update available", "orange", hide_after=30,
-                       on_click=_handle_update_click)
+                _show_update_pill()
             else:
                 status("Update available — run ./update.sh in the Wingvox folder",
                        "orange", hide_after=12)

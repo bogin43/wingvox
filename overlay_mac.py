@@ -25,11 +25,14 @@ from AppKit import (
     NSFont,
     NSLeftMouseDown,
     NSMakeRect,
+    NSMenu,
     NSPanel,
     NSRectFillUsingOperation,
     NSScreen,
+    NSStatusBar,
     NSStatusWindowLevel,
     NSTextField,
+    NSVariableStatusItemLength,
     NSView,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
@@ -418,6 +421,70 @@ class StatusOverlay:
             if seq != self._seq:  # a newer message replaced this one
                 return
         self._pill.performSelectorOnMainThread_withObject_waitUntilDone_("hide:", None, False)
+
+
+class _StatusItem(NSObject):
+    """Main-thread UI object for the menu bar "W" icon. Do not call
+    directly; use MenuBarUpdateIcon.
+
+    Exists so an update someone dismissed with "Not now" is never more than
+    one click away, without a floating panel sitting on screen the whole
+    time (the pill itself only shows on demand -- see show_/showPill_
+    below). Hidden entirely (setVisible_(False)) whenever there's nothing
+    to say, rather than always present and empty, so it never becomes
+    permanent menu-bar clutter for someone who's up to date."""
+
+    def init(self):
+        self = objc.super(_StatusItem, self).init()
+        if self is None:
+            return None
+        item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+        item.setVisible_(False)
+        item.button().setTitle_("W")
+        menu = NSMenu.alloc().init()
+        show_item = menu.addItemWithTitle_action_keyEquivalent_("Show update", "showPill:", "")
+        show_item.setTarget_(self)
+        clear_item = menu.addItemWithTitle_action_keyEquivalent_("Clear", "clear:", "")
+        clear_item.setTarget_(self)
+        item.setMenu_(menu)
+        self.item = item
+        self.on_click = None
+        return self
+
+    def show_(self, payload):
+        self.on_click = payload.get("on_click")
+        self.item.setVisible_(True)
+
+    def hide_(self, _):
+        self.on_click = None
+        self.item.setVisible_(False)
+
+    def showPill_(self, _sender):
+        cb = self.on_click
+        if cb is not None:
+            cb()
+
+    def clear_(self, _sender):
+        self.hide_(None)
+
+
+class MenuBarUpdateIcon:
+    """Thread-safe handle to the "W" menu bar icon. Create once, then call
+    show()/hide(). Independent of StatusOverlay/the pill -- this only ever
+    controls whether the icon itself is visible; opening the actual
+    Update/Not now panel is the same on_click callback the pill already
+    uses (see flow.py's _show_update_pill)."""
+
+    def __init__(self):
+        self._item = _StatusItem.alloc().init()
+
+    def show(self, on_click):
+        self._item.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "show:", {"on_click": on_click}, False
+        )
+
+    def hide(self):
+        self._item.performSelectorOnMainThread_withObject_waitUntilDone_("hide:", None, False)
 
 
 def run_event_loop():

@@ -517,6 +517,29 @@ def release_all_modifiers(kb) -> None:
             pass
 
 
+def collapse_alt_menu_mode(kb) -> None:
+    """Releasing a bare Alt key (no other key held down with it) arms
+    Windows' built-in "menu access mode" on the focused window -- the same
+    highlight a lone tap of Alt triggers in Notepad. Wingvox's hotkey *is*
+    exactly that: a tap-and-release of Right Alt with nothing else held. So
+    every dictation also arms this state, and the paste that follows a
+    fraction of a second later lands while the window is waiting for a
+    menu-accelerator keystroke instead of normal text input -- silently
+    eating both the injected paste and a manual Ctrl+V typed right after
+    (only escaping the menu state, or clicking back into the window, clears
+    it). Escape is the standard way out of that state; sending it right
+    before the paste combo clears it before Ctrl+V goes out. Harmless if the
+    window was never in that state -- apps ignore a stray Escape that isn't
+    dismissing anything."""
+    if not IS_WINDOWS:
+        return
+    try:
+        kb.press(keyboard.Key.esc)
+        kb.release(keyboard.Key.esc)
+    except Exception:
+        pass
+
+
 # ---------- Windows: no console under a --windowed PyInstaller build ----------
 
 def rotate_log(log_path: Path, max_bytes: int = 5_000_000) -> None:
