@@ -592,7 +592,7 @@ def install_dir() -> Path:
     Windows those are different places, and the update check has to look at
     the checkout, not at %LOCALAPPDATA%.
 
-    Under a frozen PyInstaller build, __file__ resolves inside the
+    Under a frozen Windows PyInstaller build, __file__ resolves inside the
     extracted _internal directory (dist/Wingvox/_internal), not the actual
     checkout -- confirmed by testing: NOTICE_PATH (notice.py) silently
     never found NOTICE.md there, so the first-run privacy notice never
@@ -602,8 +602,21 @@ def install_dir() -> Path:
     regardless of which subdirectory it's pointed at). wingvox.spec's
     COLLECT always places the exe at <repo>/dist/Wingvox/Wingvox.exe, so
     climb three levels from the running executable's own path instead of
-    trusting __file__ when frozen."""
-    if getattr(sys, "frozen", False):
+    trusting __file__ there.
+
+    Mac's Wingvox.app (an "alias mode" py2app build, launched by the
+    LaunchAgent) is also sys.frozen -- but unlike PyInstaller, alias mode
+    doesn't copy the source into the bundle, it symlinks straight back to
+    the real checkout's own files, so __file__ still resolves correctly
+    there. sys.executable does NOT: it follows the bundle's `python`
+    symlink through the venv and lands deep inside the system Python
+    framework instead (confirmed by reproduction -- the update pill showed
+    a `cd` into .../Python.framework/Versions as the "install directory").
+    Climbing from sys.executable is a Windows-PyInstaller-specific fix for
+    a Windows-PyInstaller-specific problem; it must not run on Mac just
+    because sys.frozen also happens to be true there for an unrelated
+    reason."""
+    if IS_WINDOWS and getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent.parent.parent
     return Path(__file__).resolve().parent
 

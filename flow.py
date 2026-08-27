@@ -1546,7 +1546,7 @@ def run():
                 # to change your mind. Entirely separate from the dictation
                 # hotkey/recording state machine -- nothing here to undo.
                 state["recent_ctrl_taps"] = []
-                threading.Thread(target=_check_and_show_update_status, daemon=True).start()
+                _recheck_and_show_update_status_bg()
             return
         if key not in HOTKEY_KEYS:
             return
@@ -1649,27 +1649,14 @@ def run():
         status("Updating…", "gray")
         threading.Thread(target=_do_update, daemon=True, name="wingvox-update").start()
 
-    def _show_update_pill():
-        # Shared by the initial auto-check below and by the double-tap-
-        # Control recall gesture in on_press -- no hide_after, so it only
-        # goes away when Update or Not now is actually clicked, not on a
-        # timer (someone mid-conversation about it shouldn't come back to
-        # find it gone). Also (re-)arms the menu bar icon, so "Not now" or
-        # even someone previously clicking "Clear" on the icon itself never
-        # loses the update for good -- it comes back the next time this
-        # runs, and clicking the icon just reopens this same pill.
-        status("Update available", "orange", on_click=_handle_update_click)
-        if menu_bar_icon:
-            menu_bar_icon.show(_show_update_pill)
-
-    def _check_and_show_update_status():
-        # Triple-tap's target: a fresh check every time, not a replay of
-        # whatever _update_check() found once at startup -- so the gesture
-        # keeps working for as long as this run of Wingvox is behind, not
-        # just in the few seconds after the one automatic check. Runs on its
-        # own thread (called from on_press, which must never block on git).
-        # Platform-aware -- see check_for_relevant_update()'s docstring --
-        # so a Windows-only fix doesn't page a Mac user, and vice versa.
+    def _recheck_and_show_update_status():
+        # Fresh platform-aware check every time -- shared by the double-tap-
+        # Control recall gesture and the menu bar icon's own click, so
+        # neither one can go stale and keep claiming an update is available
+        # after it's actually been taken (or stopped being relevant to this
+        # platform) since the icon was armed. Runs on its own thread when
+        # called from on_press (must never block on git) or from the icon's
+        # click (AppKit delivers that on the main thread -- same reasoning).
         behind = pc.check_for_relevant_update()
         if behind:
             _show_update_pill()
@@ -1677,6 +1664,24 @@ def run():
             status("✓ You're on the most recent version", "green", hide_after=4)
         else:
             status("⚠ Couldn't check for updates (offline?)", "orange", hide_after=4)
+
+    def _recheck_and_show_update_status_bg():
+        threading.Thread(target=_recheck_and_show_update_status, daemon=True).start()
+
+    def _show_update_pill():
+        # Shared by the initial auto-check below and by
+        # _recheck_and_show_update_status above -- no hide_after, so it only
+        # goes away when Update or Not now is actually clicked, not on a
+        # timer (someone mid-conversation about it shouldn't come back to
+        # find it gone). Also (re-)arms the menu bar icon with a fresh-check
+        # handler, not itself -- so "Not now," or even someone previously
+        # clicking "Clear" on the icon, never loses the update for good (it
+        # comes back the next time this runs), and clicking the icon always
+        # re-verifies rather than re-showing whatever was true when it was
+        # last armed.
+        status("Update available", "orange", on_click=_handle_update_click)
+        if menu_bar_icon:
+            menu_bar_icon.show(_recheck_and_show_update_status_bg)
 
     def _update_check():
         # Deliberately last and deliberately quiet. It waits for warm-up so
